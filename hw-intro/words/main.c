@@ -45,9 +45,37 @@ WordCount *word_counts = NULL;
  * Useful functions: fgetc(), isalpha().
  */
 int num_words(FILE* infile) {
-  int num_words = 0;
+  if (infile == NULL) {
+    return 0;
+  }
+  // the lengh of word should be in [2, MAX_WORD_LEN]
+  int cnt = 0;
+  char ch;
+  int len = 0;
+  while ((ch = fgetc(infile)) != EOF) {
+    if (isalpha(ch)) {
+      ++len;
+      // get a word if len >= MAX_WORD_LEN
+      if (len >= MAX_WORD_LEN) {
+        ++cnt;
+        len -= MAX_WORD_LEN;
+      }
+    }
+    else {
+      // get a word if len > 1
+      if (len > 1) {
+        ++cnt;
+      }
+      len = 0;
+    }
+  }
 
-  return num_words;
+  // tail case: LEN > 0
+  if (len > 1) {
+    ++cnt;
+  }
+
+  return cnt;
 }
 
 /*
@@ -62,6 +90,58 @@ int num_words(FILE* infile) {
  * and 0 otherwise.
  */
 int count_words(WordCount **wclist, FILE *infile) {
+  if (wclist == NULL || infile == NULL) {
+    return 1;
+  }
+
+  // char* buf = (char*)malloc(sizeof(char) * MAX_WORD_LEN + 1);
+  char* buf = (char*)calloc(MAX_WORD_LEN + 1, sizeof(char));
+  if (buf == NULL) {
+    return 1;
+  }
+
+  char ch;
+  int len = 0;
+  int fail = 0;
+  while ((ch = fgetc(infile)) != EOF) {
+    if (isalpha(ch)) {
+      buf[len] = tolower(ch);
+      ++len;
+      if (len >= MAX_WORD_LEN) {
+        // get a new word
+        fail = add_word(wclist, buf);
+        if (fail) {
+          free(buf);
+          return 1;
+        }
+        len -= MAX_WORD_LEN;
+        memset(buf, '\0', MAX_WORD_LEN + 1);
+      }
+    }
+    else {
+      // get a new word if len > 1
+      if (len > 1) {
+        fail = add_word(wclist, buf);
+        if (fail) {
+          free(buf);
+          return 1;
+        }
+        memset(buf, '\0', MAX_WORD_LEN + 1);
+      }
+      len = 0;
+    }
+  }
+  // last word if exists
+  if (len > 1) {
+    fail = add_word(wclist, buf);
+    if (fail) {
+      free(buf);
+      return 1;
+    }
+  }
+
+  free(buf);
+  buf = NULL;
   return 0;
 }
 
@@ -70,7 +150,7 @@ int count_words(WordCount **wclist, FILE *infile) {
  * Useful function: strcmp().
  */
 static bool wordcount_less(const WordCount *wc1, const WordCount *wc2) {
-  return 0;
+  return (wc1->count < wc2->count) || (wc1->count == wc2->count && strcmp(wc1->word, wc2->word));
 }
 
 // In trying times, displays a helpful message.
@@ -133,11 +213,33 @@ int main (int argc, char *argv[]) {
   if ((argc - optind) < 1) {
     // No input file specified, instead, read from STDIN instead.
     infile = stdin;
+    total_words += num_words(infile);
   } else {
     // At least one file specified. Useful functions: fopen(), fclose().
     // The first file can be found at argv[optind]. The last file can be
     // found at argv[argc-1].
+    for (int i = optind; i < argc; ++i) {
+      infile = fopen(argv[i], "r");
+      if (infile == NULL) {
+        fprintf(stderr, "open file %s failed\n", argv[i]);
+        continue;
+      }
+      if (count_mode) {
+        total_words += num_words(infile);
+      }
+      else {
+        // freq_mode == true
+        int fail = count_words(&word_counts, infile);
+        if (fail) {
+          return 1;
+        }
+      }
+      fclose(infile);
+      infile = NULL;
+    } 
   }
+
+
 
   if (count_mode) {
     printf("The total number of words is: %i\n", total_words);
