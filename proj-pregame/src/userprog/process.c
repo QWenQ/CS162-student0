@@ -350,6 +350,64 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   /* Set up stack. */
   if (!setup_stack(esp))
     goto done;
+  
+  // todo: push string FILE_NAME into stack
+  // 0xc0000000
+  // argv[0][...]  file_name          char[?] 
+  // stack_align                      uint8_t
+  // argv[1]        0                 char*
+  // argv[0]        &argv[0][...]     char*
+  // argv           &argv[0]          char**
+  // argc           1                 int     the address here should be like 0xXXXXXXX0
+  // return address 0                 void(*)()
+
+  // esp should be set to the address of 'return address'.
+  // And esp should be aligned to a 16-byte boundary at the time all arguments are pushed 
+  // to the stack before [call] instruction is executed!
+
+  // push file_name into stack
+  size_t fn_size = strlen(file_name) + 1;
+  char* fn_in_stack = *esp - fn_size; 
+  // strncpy(fn_in_stack, file_name, fn_size);
+  memcpy(fn_in_stack, file_name, fn_size);
+  char** adr_fn_in_stack = *esp;
+  *adr_fn_in_stack = fn_in_stack;
+
+  // stack-align
+  size_t align_size = (uint32_t)(*esp) & (0xF);
+  if (align_size) {
+    *esp -= align_size;
+    memset(*esp, 0, align_size);
+  }
+
+  // push argv[1] withe value (char*)0 into stack
+  *esp -= sizeof(char*);
+  char** argv_1 = *esp;
+  *argv_1 = (char*)0;
+  // memset(*esp, 0, sizeof(char*));
+  
+  // push argv[0] with value address of file_name in the stack into stack
+  *esp -= sizeof(char*);
+  char** argv_0 = *esp;
+  *argv_0 = fn_in_stack;
+
+  // push argv into stack
+  *esp -= sizeof(char**);
+  char** argv = *esp;
+  *argv = (char*)argv_0;
+
+  // push argc with value 1 into stack
+  *esp -= sizeof(long);
+  int* argc = *esp;
+  *argc = 1;
+
+  // push return address(0) into stack
+  *esp -= sizeof(0);
+  int* ret = *esp;
+  *ret = 0;
+
+
+
 
   /* Start address. */
   *eip = (void (*)(void))ehdr.e_entry;
