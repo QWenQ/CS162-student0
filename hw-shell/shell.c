@@ -170,6 +170,40 @@ void free_pipe_fds_array(int **pipe_array, size_t size) {
   } 
 }
 
+/**
+ * @brief specify the action to be associated with SIGNUM
+ * @param signum signal number passed
+ * @return void
+*/
+void forward_sig_to_foreground_process_group(int signum) {
+  // forward the signal received to all processes in the foreground group
+  pid_t fpgid = tcgetpgrp(0);
+  int ret = killpg(fpgid, signum);
+  if (ret) {
+    perror("killpg() error");
+  }
+}
+
+
+/**
+ * @brief set signal handler
+ * @param sig_handler pointer to a signal handler
+ * @return void
+*/
+void signal_handler_set(void (*sig_handler)(int)) {
+  signal(SIGINT, sig_handler);
+  signal(SIGQUIT, sig_handler);
+  signal(SIGTERM, sig_handler);
+  signal(SIGTSTP, sig_handler);
+  signal(SIGCONT, sig_handler);
+  signal(SIGTTIN, sig_handler);
+  signal(SIGTTOU, sig_handler);
+  signal(SIGKILL, sig_handler);
+}
+
+
+
+
 int main(unused int argc, unused char* argv[]) {
   init_shell();
 
@@ -236,6 +270,9 @@ int main(unused int argc, unused char* argv[]) {
         pid_t pid = fork();
         // child process
         if (pid == 0) {
+
+          // set process group to itself
+          setpgrp();
 
           // input/output redirection if pipe
           if (new_programs > 1) {
@@ -362,11 +399,24 @@ int main(unused int argc, unused char* argv[]) {
         }
         // parent process
         else if (pid > 0) {
-          // close_fds_of_array(pipe_arr, new_programs - 1);
+          // set the process group of child
+          setpgid(pid, pid);
+
+          // forward all signals to the foreground process group
+          // signal_handler_set(forward_sig_to_foreground_process_group);
+          signal_handler_set(SIG_IGN);
+
+          // parent blocked until its child done
           pid_t end_pid = wait(&pid);
           if (end_pid == -1) {
             perror("program failed!");
           }
+          
+          // reset all signals handler
+          signal_handler_set(SIG_DFL);
+
+          // parent shell back to the foreground process
+          tcsetpgrp(0, getpid());
         }
         // fork() error
         else {
@@ -382,109 +432,6 @@ int main(unused int argc, unused char* argv[]) {
       close_fds_of_array(pipe_arr, new_programs - 1);
       free_pipe_fds_array(pipe_arr, new_programs - 1);
     }
-
-
-
-/*
-      pid_t pid = fork();
-      if (pid == 0) {
-        // child process 
-        close(shell_terminal);
-
-        char *path_name = tokens_get_token(tokens, 0);
-        // get a file name from file path
-        char *file_name = strrchr(path_name, '/');
-        if (file_name == NULL) {
-          file_name = path_name;
-        }
-        else {
-          ++file_name;
-        }
-
-        // get environment variable PATH
-        char *env_path = getenv("PATH");
-        char *saveptr = NULL;
-
-        // parse PATH with strtok_r
-        for (char* path = env_path; ; path = NULL) {
-          char *dir = strtok_r(path, ":", &saveptr);
-          if (dir == NULL) {
-            break;
-          }
-          
-          // look for the target program in DIR at the first time
-          char full_path[100] = {'\0'};
-          // concate directory and file name to get a full access path of file
-          snprintf(full_path, sizeof(full_path), "%s/%s", dir, file_name);
-          FILE *file_stream = fopen(full_path, "r");
-          if (file_stream != NULL) {
-            fclose(file_stream);
-            // parse the arguments passed to execv() and redirection if necessary
-            size_t token_length = tokens_get_length(tokens);
-            char *argv_execv[token_length + 1];
-            memset(argv_execv, 0x0, sizeof argv_execv);
-            argv_execv[0] = full_path;
-            size_t idx = 1;
-            while (idx < token_length) {
-              char *token = tokens_get_token(tokens, idx);
-              if (strncmp(token, "<", 1) == 0) {
-                ++idx;
-                if (idx >= token_length) {
-                  fprintf(stderr, "error on redirection");
-                  exit(1);
-                }
-                char *input_filename = tokens_get_token(tokens, idx);
-                int input_file_no = open(input_filename, O_RDONLY | __O_CLOEXEC, S_IRUSR | S_IWUSR);
-                if (input_file_no == -1) {
-                  perror("error on input file");
-                  exit(1);
-                }
-
-                int ret = dup2(input_file_no, STDIN_FILENO);
-                if (ret == -1) {
-                  fprintf(stderr, "error on dup syscall");
-                  exit(1);
-                }
-              } 
-              else if (strncmp(token, ">", 1) == 0) {
-                ++idx;
-                if (idx >= token_length) {
-                  fprintf(stderr, "error on redirection");
-                  exit(1);
-                }
-                char *output_filename = tokens_get_token(tokens, idx);
-                int output_file_no = open(output_filename, O_WRONLY | O_CREAT | __O_CLOEXEC, S_IRUSR | S_IWUSR);
-                if (output_file_no == -1) {
-                  fprintf(stderr, "error on input file");
-                  exit(1);
-                }
-
-                int ret = dup2(output_file_no, STDOUT_FILENO);
-                if (ret == -1) {
-                  fprintf(stderr, "error on dup syscall");
-                  exit(1);
-                }
-              }
-              else {
-                argv_execv[idx] = tokens_get_token(tokens, idx);
-              }
-              ++idx;
-            }
-
-            execv(full_path, argv_execv);
-            exit(0);
-          }
-        }
-      }
-      else if (pid > 0) {
-        // parent process
-        pid_t end_pid = wait(&pid);
-        if (end_pid == -1) {
-          perror("program failed!");
-        }
-      }
-    }
-*/
 
     if (shell_is_interactive)
       /* Please only print shell prompts when standard input is not a tty */
