@@ -5,6 +5,8 @@
 #include "userprog/process.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/pte.h"
+#include "pagedir.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -78,6 +80,9 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
+
+      printf("%s: exit(%d)\n", thread_current()->pcb->process_name, f->eax);
+
       process_exit();
       NOT_REACHED();
 
@@ -123,6 +128,29 @@ static void page_fault(struct intr_frame* f) {
      (#PF)". */
   asm("movl %%cr2, %0" : "=r"(fault_addr));
 
+  // if page fault is triggered by a bad reference from a system call
+//   if (fault_addr == NULL) {
+//    f->eip = (void(*)(void))f->eax;
+//    f->eax = -1;
+//    return;
+//   }
+
+//   // page directory base address
+// //   uintptr_t pdb_addr;
+//   uint32_t* pd_addr;
+//   // get page directory base address from CR3
+//   asm volatile("movl %%cr3, %0" : "=r"(pd_addr));
+// //   uintptr_t pd_idx = pd_no(fault_addr);
+// //   uint32_t *pd_addr = pdb_addr + pd_idx;
+// //   void *page_addr = pagedir_get_page (pd_addr, fault_addr);
+//   void *page_addr = pagedir_get_page (pd_addr, fault_addr);
+//   // return if FAULT_ADDR is an unmapped pointer
+//   if (page_addr == NULL) {
+//    f->eip = (void(*)(void))f->eax;
+//    f->eax = -1;
+//    return;
+//   }
+
   /* Turn interrupts back on (they were only off so that we could
      be assured of reading CR2 before it changed). */
   intr_enable();
@@ -135,11 +163,23 @@ static void page_fault(struct intr_frame* f) {
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
+
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */
-  printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
-         not_present ? "not present" : "rights violation", write ? "writing" : "reading",
-         user ? "user" : "kernel");
-  kill(f);
+//   printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
+//          not_present ? "not present" : "rights violation", write ? "writing" : "reading",
+//          user ? "user" : "kernel");
+
+  // return -1 if page fault triggered by a bad reference from a syscall
+  if (!user) {
+   f->eip = (void(*)(void))f->eax;
+   f->eax = -1;
+   return;
+  }
+  // if the page fault is triggered by a user progress, terminate the offending process
+  else {
+   f->eax = -1;
+   kill(f);
+  }
 }

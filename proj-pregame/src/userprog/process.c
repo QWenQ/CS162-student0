@@ -20,6 +20,16 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
+
+/* latch on the work of creating a new process */
+struct latch_on_create_new_process {
+  bool is_new_process_create_done_; /* true if work of creating a new process is done */
+  bool is_creating_succeed_; /* true if new process work as expected */
+  struct lock monitor_lock_; /* monitor lock */
+  struct condition done_cond_; /* signaled when work of creatign a new process is done*/
+} latch_on_create_new_process;
+
+
 static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
@@ -62,16 +72,26 @@ pid_t process_execute(const char* file_name) {
     return TID_ERROR;
   strlcpy(fn_copy, file_name, PGSIZE);
 
+  char* save_ptr = NULL;
+  char* command_line = (char*)file_name;
+  char* real_file_name = strtok_r(command_line, " ", &save_ptr);
+
+  /* initialization for latch on creating a new process */
+  // lock_init(&latch_on_create_new_process.monitor_lock_);
+  // cond_init(&latch_on_create_new_process.done_cond_);
+  // latch_on_create_new_process.is_new_process_create_done_ = false;
+
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create(real_file_name, PRI_DEFAULT, start_process, fn_copy);
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
+  
   return tid;
 }
 
-/* A thread function that loads a user process and starts it
-   running. */
+/* A thread function that loads a user process and starts it running. */
 static void start_process(void* file_name_) {
+  // file_name containing all command-line args passed to the main()
   char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
@@ -91,6 +111,10 @@ static void start_process(void* file_name_) {
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+    
+    // Initializing the open file hash array in the new pcb
+    rw_lock_init(&(new_pcb->file_rw_lock));
+    memset(new_pcb->open_files, 0, sizeof(uintptr_t) * MAX_FILES);
   }
 
   /* Initialize interrupt frame and load executable. */
@@ -111,6 +135,16 @@ static void start_process(void* file_name_) {
     t->pcb = NULL;
     free(pcb_to_free);
   }
+
+  /* after initialization work is done, signal the waiting process */
+  // latch_on_create_new_process.is_creating_succeed_ = success;
+  // latch_on_create_new_process.is_new_process_create_done_ = true;
+  // lock_acquire(&latch_on_create_new_process.monitor_lock_);
+  // cond_signal(&latch_on_create_new_process.done_cond_, &latch_on_create_new_process.monitor_lock_);
+
+  // lock_release(&latch_on_create_new_process.monitor_lock_);
+
+
 
   /* Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
@@ -140,6 +174,7 @@ static void start_process(void* file_name_) {
    does nothing. */
 int process_wait(pid_t child_pid UNUSED) {
   sema_down(&temporary);
+  while (true) { }
   return 0;
 }
 
@@ -281,7 +316,40 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   if (t->pcb->pagedir == NULL)
     goto done;
   process_activate();
+  
+  /**
+   * parse command-line arguments in the FILE_NAME argument
+   * 1. break the command in to words;
+   * 2. place the words at the top of the stack and store their address in right-to-left order;
+   * 3. load ELF executable from real file name parsed above;
+   * 4. 16-byte alignment and push address of words into the statck in right-to-left order;
+   * 5. push a fake return address into the stack;
+   * 
+  */
 
+
+
+  // 1. break the command line into words
+  size_t command_nums = 0;
+  bool new_command = true;
+  size_t command_length = strlen(file_name);
+  char *command_line = (char*)file_name;
+  while (*command_line != '\0') {
+    if (*command_line == ' ') {
+      *command_line = '\0';
+      new_command = true;
+    }
+    else {
+      if (new_command) {
+        ++command_nums;
+        new_command = false;
+      }
+    }
+    ++command_line;
+  }
+
+  
+  // 3. load ELF executable from real file name parsed above;
   /* Open executable file. */
   file = filesys_open(file_name);
   if (file == NULL) {
@@ -351,68 +419,89 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   if (!setup_stack(esp))
     goto done;
   
-  // todo: push string FILE_NAME into stack
-  // 0xc0000000
-  // argv[0][...]  file_name          char[?] 
-  // stack_align                      uint8_t
-  // argv[1]        0                 char*
-  // argv[0]        &argv[0][...]     char*
-  // argv           &argv[0]          char**
-  // argc           1                 int     the address here should be like 0xXXXXXXX0
-  // return address 0                 void(*)()
+  {
+    // 2. place the words at the top of the stack and store their address in right-to-left order;
+    command_line = PHYS_BASE -command_length - 1; 
+    memcpy(command_line, file_name, command_length + 1);
 
-  // esp should be set to the address of 'return address'.
-  // And esp should be aligned to a 16-byte boundary at the time all arguments are pushed 
-  // to the stack before [call] instruction is executed!
+    // 0xc0000000(PHYS_BASE)
+    // argv[n - 1][...]
+    // ... 
+    // argv[1][...]
+    // argv[0][...]  file_name          char[?] 
+    // stack_align                      uint8_t
+    // argv[n]        0
+    // ....
+    // argv[1]        ...                 char*
+    // argv[0]        &argv[0][...]     char*
+    // argv           &argv[0]          char**
+    // argc           1                 int     the address here should be like 0xXXXXXXX0 -> 16-byte alignment at this point 
+    // (fake)return address 0                 void(*)()
 
-  // push file_name into stack
-  size_t fn_size = strlen(file_name) + 1;
-  char* fn_in_stack = *esp - fn_size; 
-  // strncpy(fn_in_stack, file_name, fn_size);
-  memcpy(fn_in_stack, file_name, fn_size);
-  char** adr_fn_in_stack = *esp;
-  *adr_fn_in_stack = fn_in_stack;
+    // 4. 16-byte alignment and push address of words into the statck in right-to-left order;
+    // 4.1 16-byte alignment
+    size_t stack_align_bytes = 0;
+    size_t command_bytes_used_in_stack = command_length + 1 + (command_nums + 3) * sizeof(char*);
+    if((command_bytes_used_in_stack % 16) != 0) {
+      stack_align_bytes = 16 - (command_bytes_used_in_stack % 16);
+      command_bytes_used_in_stack += stack_align_bytes;
+    }
+    *esp -= (command_length + stack_align_bytes + 1);
+    if (stack_align_bytes != 0) {
+      memset(*esp, 0, stack_align_bytes);
+    }
 
-  // stack-align
-  size_t align_size = (uint32_t)(*esp) & (0xF);
-  if (align_size) {
-    *esp -= align_size;
-    memset(*esp, 0, align_size);
+    // 4.2 push address of words into stack in right-to-left order
+
+    // store args' address in the local buffer
+    const size_t args_nums = command_nums + 1;
+
+    char* args_add[args_nums];
+
+    memset(args_add, 0, args_nums * sizeof(char*));
+    new_command = true;
+    while (command_line != PHYS_BASE) {
+      if (*command_line != '\0') {
+        if (new_command) {
+          args_add[command_nums] = command_line;
+          --command_nums;
+          new_command = false;
+        }
+      }
+      else {
+        // expect next command arg string
+        new_command = true;
+      }
+      ++command_line;
+    }
+
+    // push args' address into the stack in the right-to-left order
+    for (size_t idx = 0; idx < args_nums; ++idx) {
+      *esp -= sizeof(char*);
+      *(int*)(*esp) = (int)args_add[idx];
+    }
+
+    // push argv and argc into the stack
+    char* argv = *esp;
+    *esp -= sizeof(char*);
+    *(int*)(*esp) = (int)argv;
+
+    *esp -= sizeof(int);
+    *(int*)(*esp) = args_nums - 1;
+
+    // debug
+    // printf("%p\n", *esp);
+    // hex_dump(0, *esp, command_bytes_used_in_stack, true);
+
+    // 5. push a fake return address into the stack;
+    *esp -= sizeof(0);
+    *(int*)(*esp) = 0;
+
+    /* Start address. */
+    *eip = (void (*)(void))ehdr.e_entry;
+
+    success = true;
   }
-
-  // push argv[1] withe value (char*)0 into stack
-  *esp -= sizeof(char*);
-  char** argv_1 = *esp;
-  *argv_1 = (char*)0;
-  // memset(*esp, 0, sizeof(char*));
-  
-  // push argv[0] with value address of file_name in the stack into stack
-  *esp -= sizeof(char*);
-  char** argv_0 = *esp;
-  *argv_0 = fn_in_stack;
-
-  // push argv into stack
-  *esp -= sizeof(char**);
-  char** argv = *esp;
-  *argv = (char*)argv_0;
-
-  // push argc with value 1 into stack
-  *esp -= sizeof(long);
-  int* argc = *esp;
-  *argc = 1;
-
-  // push return address(0) into stack
-  *esp -= sizeof(0);
-  int* ret = *esp;
-  *ret = 0;
-
-
-
-
-  /* Start address. */
-  *eip = (void (*)(void))ehdr.e_entry;
-
-  success = true;
 
 done:
   /* We arrive here whether the load is successful or not. */

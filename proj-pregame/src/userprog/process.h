@@ -9,6 +9,8 @@
 #define MAX_STACK_PAGES (1 << 11)
 #define MAX_THREADS 127
 
+#define MAX_FILES 128
+
 /* PIDs and TIDs are the same type. PID should be
    the TID of the main thread of the process */
 typedef tid_t pid_t;
@@ -27,6 +29,10 @@ struct process {
   uint32_t* pagedir;          /* Page directory. */
   char process_name[16];      /* Name of the main thread */
   struct thread* main_thread; /* Pointer to main thread */
+
+  /* fields for file descriptors */
+  struct rw_lock file_rw_lock; /* lock for fd hash array */
+  struct file* open_files[MAX_FILES]; /* fd hash array */
 };
 
 void userprog_init(void);

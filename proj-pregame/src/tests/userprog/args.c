@@ -13,10 +13,12 @@ int main(int argc, char* argv[]) {
   msg("begin");
   msg("argc = %d", argc);
   for (i = 0; i <= argc; i++)
-    if (argv[i] != NULL)
+    if (argv[i] != NULL) {
       msg("argv[%d] = '%s'", i, argv[i]);
-    else
+    }
+    else {
       msg("argv[%d] = null", i);
+    }
   msg("end");
 
   return 0;

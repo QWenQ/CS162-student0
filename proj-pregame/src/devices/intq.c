@@ -67,7 +67,7 @@ static int next(int pos) { return (pos + 1) % INTQ_BUFSIZE; }
 
 /* WAITER must be the address of Q's not_empty or not_full
    member.  Waits until the given condition is true. */
-static void wait(struct intq* q UNUSED, struct thread** waiter) {
+static void wait(struct intq* q , struct thread** waiter) {
   ASSERT(!intr_context());
   ASSERT(intr_get_level() == INTR_OFF);
   ASSERT((waiter == &q->not_empty && intq_empty(q)) || (waiter == &q->not_full && intq_full(q)));
