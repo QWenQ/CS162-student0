@@ -130,6 +130,9 @@ int main(void) {
   filesys_init(format_filesys);
 #endif
 
+  // initialize FPU state
+  asm volatile("finit" : : : "memory");
+  
   printf("Boot complete.\n");
 
   /* Run actions specified on kernel command line. */

@@ -21,16 +21,7 @@
 #include "threads/vaddr.h"
 
 
-/* latch on the work of creating a new process */
-struct latch_on_create_new_process {
-  bool is_new_process_create_done_; /* true if work of creating a new process is done */
-  bool is_creating_succeed_; /* true if new process work as expected */
-  struct lock monitor_lock_; /* monitor lock */
-  struct condition done_cond_; /* signaled when work of creatign a new process is done*/
-} latch_on_create_new_process;
-
-
-static struct semaphore temporary;
+// static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp);
@@ -54,6 +45,13 @@ void userprog_init(void) {
 
   /* Kill the kernel if we did not succeed */
   ASSERT(success);
+
+  // main thread has no parent
+  t->pcb->parent_ = NULL;
+
+  // initialize list of child processes
+  list_init(&t->pcb->children_);
+  list_init(&t->pcb->child_exec_info_list_);
 }
 
 /* Starts a new thread running a user program loaded from
@@ -62,29 +60,52 @@ void userprog_init(void) {
    process id, or TID_ERROR if the thread cannot be created. */
 pid_t process_execute(const char* file_name) {
   char* fn_copy;
+  char* just_file_name;
   tid_t tid;
 
-  sema_init(&temporary, 0);
+  // sema_init(&temporary, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
   if (fn_copy == NULL)
     return TID_ERROR;
+
+  // get length of the file name
+  size_t file_name_length = 0;
+  while (file_name[file_name_length] != ' ') {
+    ++file_name_length;
+  }
+  just_file_name = (char*)malloc(file_name_length + 1);
+  // just_file_name = palloc_get_page(0);
+  if (just_file_name == NULL) {
+    palloc_free_page(fn_copy);
+    return TID_ERROR;
+  }
+  memcpy(just_file_name, file_name, file_name_length);
+  just_file_name[file_name_length] = '\0';
+
   strlcpy(fn_copy, file_name, PGSIZE);
 
-  char* save_ptr = NULL;
-  char* command_line = (char*)file_name;
-  char* real_file_name = strtok_r(command_line, " ", &save_ptr);
+  // pass struct process of the parent into the child
+  struct thread* current_thread = thread_current();
+  struct process* current_process = current_thread->pcb;
+  memcpy((void*)(fn_copy + PGSIZE - sizeof(struct process*)), (const void*)&current_process, sizeof(struct process*));
 
-  /* initialization for latch on creating a new process */
-  // lock_init(&latch_on_create_new_process.monitor_lock_);
-  // cond_init(&latch_on_create_new_process.done_cond_);
-  // latch_on_create_new_process.is_new_process_create_done_ = false;
+  sema_init(&current_process->exec_child_done_, 0);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(real_file_name, PRI_DEFAULT, start_process, fn_copy);
-  if (tid == TID_ERROR)
-    palloc_free_page(fn_copy);
+  tid = thread_create(just_file_name, PRI_DEFAULT, start_process, fn_copy);
+
+  free(just_file_name);
+  
+  if (tid != TID_ERROR) {
+    /* parent waits until the child has done its loading */
+    sema_down(&current_process->exec_child_done_);
+    if (!current_process->is_child_created_success_) {
+      tid = TID_ERROR;
+      // palloc_free_page(fn_copy);
+    }
+  }
   
   return tid;
 }
@@ -98,7 +119,7 @@ static void start_process(void* file_name_) {
   bool success, pcb_success;
 
   /* Allocate process control block */
-  struct process* new_pcb = malloc(sizeof(struct process));
+  struct process* new_pcb = (struct process*)malloc(sizeof(struct process));
   success = pcb_success = new_pcb != NULL;
 
   /* Initialize process control block */
@@ -111,10 +132,15 @@ static void start_process(void* file_name_) {
     // Continue initializing the PCB as normal
     t->pcb->main_thread = t;
     strlcpy(t->pcb->process_name, t->name, sizeof t->name);
+
+    memcpy((void*)&new_pcb->parent_, (const void*)(file_name_ + PGSIZE - sizeof(struct process*)), sizeof(struct process*));
+    list_init(&new_pcb->children_);
+    list_init(&new_pcb->child_exec_info_list_);
     
     // Initializing the open file hash array in the new pcb
-    rw_lock_init(&(new_pcb->file_rw_lock));
-    memset(new_pcb->open_files, 0, sizeof(uintptr_t) * MAX_FILES);
+    rw_lock_init(&(new_pcb->file_rw_lock_));
+    new_pcb->open_files_ = calloc(sizeof(struct file*), MAX_FILES);
+
   }
 
   /* Initialize interrupt frame and load executable. */
@@ -126,6 +152,30 @@ static void start_process(void* file_name_) {
     success = load(file_name, &if_.eip, &if_.esp);
   }
 
+  palloc_free_page(file_name);
+
+  // update children list of the parent if the child(current) run successes
+  if (success) {
+    // add a new child execution info into the list in the parent
+    if (new_pcb->parent_) {
+      struct execution_info *child_exec_info = (struct execution_info*)malloc(sizeof(struct execution_info));
+      if (child_exec_info != NULL) {
+        child_exec_info->child_pid_ = new_pcb->main_thread->tid;
+        sema_init(&child_exec_info->ready_to_die_, 0);
+
+        list_push_back(&new_pcb->parent_->child_exec_info_list_, &child_exec_info->elem_);
+        list_push_back(&new_pcb->parent_->children_, &new_pcb->elem_);
+      }
+      else {
+        success = false;
+      }
+    }
+  }
+
+  new_pcb->parent_->is_child_created_success_ = success;
+  sema_up(&new_pcb->parent_->exec_child_done_);
+
+
   /* Handle failure with succesful PCB malloc. Must free the PCB */
   if (!success && pcb_success) {
     // Avoid race where PCB is freed before t->pcb is set to NULL
@@ -133,25 +183,22 @@ static void start_process(void* file_name_) {
     // can try to activate the pagedir, but it is now freed memory
     struct process* pcb_to_free = t->pcb;
     t->pcb = NULL;
+    if (pcb_to_free->executable_) {
+      file_close(pcb_to_free->executable_);
+    }
+    free(pcb_to_free->open_files_);
     free(pcb_to_free);
   }
 
-  /* after initialization work is done, signal the waiting process */
-  // latch_on_create_new_process.is_creating_succeed_ = success;
-  // latch_on_create_new_process.is_new_process_create_done_ = true;
-  // lock_acquire(&latch_on_create_new_process.monitor_lock_);
-  // cond_signal(&latch_on_create_new_process.done_cond_, &latch_on_create_new_process.monitor_lock_);
-
-  // lock_release(&latch_on_create_new_process.monitor_lock_);
-
-
 
   /* Clean up. Exit on failure or jump to userspace */
-  palloc_free_page(file_name);
+  // palloc_free_page(file_name);
   if (!success) {
-    sema_up(&temporary);
+    // sema_up(&temporary);
     thread_exit();
   }
+
+
 
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
@@ -173,9 +220,35 @@ static void start_process(void* file_name_) {
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int process_wait(pid_t child_pid UNUSED) {
-  sema_down(&temporary);
-  while (true) { }
-  return 0;
+  // sema_down(&temporary);
+  struct thread* current_thread = thread_current();
+  struct process* current_process = current_thread->pcb;
+
+  struct list_elem *e = NULL;
+  struct execution_info *child_exec_info = NULL;
+  struct list *child_exec_info_list = &current_process->child_exec_info_list_;
+  for (e = list_begin(child_exec_info_list); e != list_end(child_exec_info_list); e = list_next(e)) {
+    child_exec_info = list_entry(e, struct execution_info, elem_);
+    if (child_exec_info->child_pid_ == child_pid) {
+      break;
+    }
+    child_exec_info = NULL;
+  }
+
+  if (child_exec_info == NULL) {
+    return -1;
+  }
+
+  // wait until the child with CHILD_PID exits
+  sema_down(&child_exec_info->ready_to_die_);
+
+  int child_exit_status = child_exec_info->exit_status_;
+
+  // delete execution info of the child
+  list_remove(e);
+  free(child_exec_info);
+
+  return child_exit_status;
 }
 
 /* Free the current process's resources. */
@@ -205,15 +278,56 @@ void process_exit(void) {
     pagedir_destroy(pd);
   }
 
+  /* disconnect the connection between parent and its children */
+  struct list_elem *e = NULL;
+  for (e = list_begin(&cur->pcb->children_); e != list_end(&cur->pcb->children_); e = list_next(e)) {
+    struct process *child = list_entry(e, struct process, elem_);
+    // todo: should this be sychronized with other tasks?
+    child->parent_ = NULL;
+  }
+
+  while (!list_empty(&cur->pcb->child_exec_info_list_)) {
+    e = list_pop_front(&cur->pcb->child_exec_info_list_);
+    struct execution_info *exec_info = list_entry(e, struct execution_info, elem_);
+    free(exec_info);
+  }
+
+  // delete child(current process) from its parent
+  if (cur->pcb->parent_) {
+    struct list *children_from_parent = &cur->pcb->parent_->children_;
+    for (e = list_begin(children_from_parent); e != list_end(children_from_parent); e = list_next(e)) {
+      struct process *child = list_entry(e, struct process, elem_);
+      if (child->main_thread->tid == cur->tid) {
+        list_remove(e);
+        break;
+      }
+    }
+  }
+
+
   /* Free the PCB of this process and kill this thread
      Avoid race where PCB is freed before t->pcb is set to NULL
      If this happens, then an unfortuantely timed timer interrupt
      can try to activate the pagedir, but it is now freed memory */
   struct process* pcb_to_free = cur->pcb;
   cur->pcb = NULL;
+
+  if (pcb_to_free->executable_) {
+    file_close(pcb_to_free->executable_);
+  }
+
+  // close open files and free open file array
+  for (size_t i = 2; i < MAX_FILES; ++i) {
+    if (pcb_to_free->open_files_[i]) {
+      file_close(pcb_to_free->open_files_[i]);
+    }
+  }
+
+  free(pcb_to_free->open_files_);
   free(pcb_to_free);
 
-  sema_up(&temporary);
+
+  // sema_up(&temporary);
   thread_exit();
 }
 
@@ -503,9 +617,16 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
     success = true;
   }
 
+  file_deny_write(file);
+
 done:
   /* We arrive here whether the load is successful or not. */
-  file_close(file);
+  if (!success && file) {
+    file_close(file);
+    file = NULL;
+  }
+  struct thread *cur_thread = thread_current();
+  cur_thread->pcb->executable_ = file;
   return success;
 }
 

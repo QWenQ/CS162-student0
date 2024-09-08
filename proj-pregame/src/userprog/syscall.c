@@ -6,14 +6,11 @@
 #include "threads/thread.h"
 #include "userprog/process.h"
 
+// #include "filesys/off_t.h"
+
 #define PHYS_BASE 0xc0000000 /* 3 GB. */
 
-extern struct latch_on_create_new_process {
-  bool is_new_process_create_done_; /* true if work of creating a new process is done */
-  bool is_creating_succeed_; /* true if new process work as expected */
-  struct lock monitor_lock_; /* monitor lock */
-  struct condition done_cond_; /* signaled when work of creatign a new process is done*/
-} latch_on_create_new_process;
+#define SIZE_OF_FPU 108 /* length of FPU is 108 bytes */
 
 static int get_user(const uint8_t *uaddr);
 
@@ -102,7 +99,7 @@ static int is_legal_fd(int fd) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  if (fd >= MAX_FILES || fd < 0 || pcb->open_files[fd] == NULL) {
+  if (fd >= MAX_FILES || fd < 0 || pcb->open_files_[fd] == NULL) {
     return -1;
   }
   return 0;
@@ -110,19 +107,7 @@ static int is_legal_fd(int fd) {
 
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
-
-  // syscall number check
-  uint8_t* syscall_number_byte_pointer = (uint8_t*)f->esp;
-  for (size_t len = 0; len < (sizeof(SYS_CHDIR) / sizeof (uint8_t)); ++len) {
-    f->eax = is_legal_pointer(syscall_number_byte_pointer, true);
-    if ((int)f->eax == -1) {
-      return;
-    }
-    ++syscall_number_byte_pointer;
-  }
-
   uint32_t* args = ((uint32_t*)f->esp);
-
 
   /*
    * The following print statement, if uncommented, will print out the syscall
@@ -137,6 +122,24 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     f->eax = is_legal_pointer((uint8_t*)(args + 1), true);
     if ((int)f->eax != -1) {
       f->eax = args[1];
+    }
+
+    // update the exit status to the parent
+    struct thread *cur_thread = thread_current();
+    if (cur_thread->pcb != NULL) {
+      struct process *cur_process = cur_thread->pcb;
+      struct process *parent = cur_process->parent_;
+      if (parent) {
+        struct list_elem *e = NULL;
+        for (e = list_begin(&parent->child_exec_info_list_); e != list_end(&parent->child_exec_info_list_); e = list_next(e)) {
+          struct execution_info *exec_info = list_entry(e, struct execution_info, elem_);
+          if (exec_info->child_pid_ == cur_thread->tid) {
+            exec_info->exit_status_ = args[1];
+            sema_up(&exec_info->ready_to_die_);
+            break;
+          }
+        }
+      }
     }
 
     printf("%s: exit(%d)\n", thread_current()->pcb->process_name, f->eax);
@@ -158,29 +161,13 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     // signature: pid_t exec (const char *cmd_line)
     exit_if_error(f, (uint8_t*)(args + 1), true);
     const char* cmd_line = (const char*)args[1];
-
-    f->eax = -1;
-
-    // pid_t pid = process_execute(cmd_line);
-    // if (pid == TID_ERROR) {
-    //   return;
-    // }
-
-    // while (!latch_on_create_new_process.is_new_process_create_done_) {
-    //   lock_acquire(&latch_on_create_new_process.monitor_lock_); 
-    //   cond_wait(&latch_on_create_new_process.done_cond_, &latch_on_create_new_process.monitor_lock_);
-    // }
-
-    // lock_release(&latch_on_create_new_process.monitor_lock_);
-
-    // if (latch_on_create_new_process.is_creating_succeed_) { 
-    //   f->eax = pid;
-    // }
-
+    f->eax = process_execute(cmd_line);
   }
   else if (args[0] == SYS_WAIT) {
     // signature: int wait (pid_t pid)
-
+    exit_if_error(f, (uint8_t*)(args + 1), true);
+    pid_t child_pid = (pid_t)args[1];
+    f->eax = process_wait(child_pid);
   }
   else if (args[0] == SYS_CREATE) {
     // signature: bool create (const char *file, unsigned initial_size)
@@ -197,11 +184,11 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   else if (args[0] == SYS_REMOVE) {
     // signature: bool remove (const char *file)
     exit_if_error(f, (uint8_t*)(args + 1), true);
-    const char* file = (const char*)args[1];
+    const char* file_name = (const char*)args[1];
+    
+    bool success = filesys_remove(file_name);
 
-    bool success = filesys_remove(file);
     f->eax = success ? 1 : 0;
-
   }
   else if (args[0] == SYS_OPEN) {
     f->eax = is_legal_pointer((uint8_t*)(args + 1), true);
@@ -229,16 +216,16 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
     f->eax = -1;
     // ciritical section
-    rw_lock_acquire(&(pcb->file_rw_lock), false);
+    rw_lock_acquire(&(pcb->file_rw_lock_), false);
     for (int i = 2; i < MAX_FILES; ++i) {
-      if (pcb->open_files[i] == NULL) {
-        pcb->open_files[i] = open_file;
+      if (pcb->open_files_[i] == NULL) {
+        pcb->open_files_[i] = open_file;
         f->eax = i;
         break;
       }
     }
 
-    rw_lock_release(&(pcb->file_rw_lock), false);
+    rw_lock_release(&(pcb->file_rw_lock_), false);
   }
   else if (args[0] == SYS_FILESIZE) {
     // signature: int filesize (int fd)
@@ -253,12 +240,12 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     struct thread* running_thread = thread_current();
     struct process* pcb = running_thread->pcb;
 
-    rw_lock_acquire(&(pcb->file_rw_lock), true);
-    struct file* p_file = pcb->open_files[fd];
+    rw_lock_acquire(&(pcb->file_rw_lock_), true);
+    struct file* p_file = pcb->open_files_[fd];
     if (p_file != NULL) {
       f->eax = file_length(p_file);
     }
-    rw_lock_release(&(pcb->file_rw_lock), true);
+    rw_lock_release(&(pcb->file_rw_lock_), true);
 
   }
   else if (args[0] == SYS_READ) {
@@ -299,10 +286,10 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     struct thread* running_thread = thread_current();
     struct process* pcb = running_thread->pcb;
 
-    rw_lock_acquire(&(pcb->file_rw_lock), true);
-    struct file* p_file = pcb->open_files[fd];
+    rw_lock_acquire(&(pcb->file_rw_lock_), true);
+    struct file* p_file = pcb->open_files_[fd];
     f->eax = file_read(p_file, buffer, size);
-    rw_lock_release(&(pcb->file_rw_lock), true);
+    rw_lock_release(&(pcb->file_rw_lock_), true);
 
   }
   else if (args[0] == SYS_WRITE) {
@@ -331,10 +318,10 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     struct thread* running_thread = thread_current();
     struct process* pcb = running_thread->pcb;
 
-    rw_lock_acquire(&(pcb->file_rw_lock), true);
-    struct file* p_file = pcb->open_files[fd];
+    rw_lock_acquire(&(pcb->file_rw_lock_), true);
+    struct file* p_file = pcb->open_files_[fd];
     f->eax = file_write(p_file, buffer, size);
-    rw_lock_release(&(pcb->file_rw_lock), true);
+    rw_lock_release(&(pcb->file_rw_lock_), true);
   }
   else if (args[0] == SYS_SEEK) {
     // signature: void seek (int fd, unsigned position)
@@ -351,10 +338,10 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     struct thread* running_thread = thread_current();
     struct process* pcb = running_thread->pcb;
 
-    rw_lock_acquire(&pcb->file_rw_lock, true);
-    struct file* p_file = pcb->open_files[fd];
+    rw_lock_acquire(&pcb->file_rw_lock_, true);
+    struct file* p_file = pcb->open_files_[fd];
     file_seek(p_file, position);
-    rw_lock_release(&pcb->file_rw_lock, true);
+    rw_lock_release(&pcb->file_rw_lock_, true);
 
   }
   else if (args[0] == SYS_TELL) {
@@ -370,10 +357,10 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     struct process* pcb = running_thread->pcb;
 
 
-    rw_lock_acquire(&pcb->file_rw_lock, true);
-    struct file* p_file = pcb->open_files[fd];
+    rw_lock_acquire(&pcb->file_rw_lock_, true);
+    struct file* p_file = pcb->open_files_[fd];
     f->eax = file_tell(p_file);
-    rw_lock_release(&pcb->file_rw_lock, true);
+    rw_lock_release(&pcb->file_rw_lock_, true);
   }
   else if (args[0] == SYS_CLOSE) {
     // signature: void close (int fd)
@@ -386,11 +373,36 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     struct thread* running_thread = thread_current();
     struct process* pcb = running_thread->pcb;
 
-    rw_lock_acquire(&pcb->file_rw_lock, false);
-    struct file* p_file = pcb->open_files[fd];
+    rw_lock_acquire(&pcb->file_rw_lock_, false);
+    struct file* p_file = pcb->open_files_[fd];
     file_close(p_file);
-    pcb->open_files[fd] = NULL;
-    rw_lock_release(&pcb->file_rw_lock, false);
+    pcb->open_files_[fd] = NULL;
+    rw_lock_release(&pcb->file_rw_lock_, false);
+  }
+  else if (args[0] == SYS_COMPUTE_E) {
+    // signature: double compute_e (int n)
+    exit_if_error(f, (uint8_t*)(args + 1), true);
+
+    int n = (int)args[1];
+
+    // store state of fpu
+    uint8_t fpu[SIZE_OF_FPU];
+    asm volatile(
+      "fsave %0" 
+      : "=m"(*fpu) 
+      : 
+      : "memory"
+    );
+
+    f->eax = sys_sum_to_e(n);
+
+    // restore state of fpu
+    asm volatile(
+      "frstor %0"
+      :
+      : "m"(*fpu)
+      : "memory"
+    );
   }
   else {
     // do nothing

@@ -77,12 +77,29 @@ static void kill(struct intr_frame* f) {
     case SEL_UCSEG:
       /* User's code segment, so it's a user exception, as we
          expected.  Kill the user process.  */
-      printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
-             intr_name(f->vec_no));
-      intr_dump_frame(f);
+      // printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
+      //        intr_name(f->vec_no));
+      // intr_dump_frame(f);
 
       printf("%s: exit(%d)\n", thread_current()->pcb->process_name, f->eax);
 
+      // If the process did not call exit but was terminated by the kernel (e.g. killed due to an exception), wait must return -1.
+      struct thread *cur_thread = thread_current();
+      if (cur_thread->pcb != NULL) {
+         struct process *cur_process = cur_thread->pcb;
+         struct process *parent = cur_process->parent_;
+         if (parent) {
+            struct list_elem *e = NULL;
+            for (e = list_begin(&parent->child_exec_info_list_); e != list_end(&parent->child_exec_info_list_); e = list_next(e)) {
+               struct execution_info *exec_info = list_entry(e, struct execution_info, elem_);
+               if (exec_info->child_pid_ == cur_thread->tid) {
+                  exec_info->exit_status_ = -1;
+                  sema_up(&exec_info->ready_to_die_);
+                  break;
+               }
+            }
+         }
+      }
       process_exit();
       NOT_REACHED();
 
@@ -128,28 +145,8 @@ static void page_fault(struct intr_frame* f) {
      (#PF)". */
   asm("movl %%cr2, %0" : "=r"(fault_addr));
 
-  // if page fault is triggered by a bad reference from a system call
-//   if (fault_addr == NULL) {
-//    f->eip = (void(*)(void))f->eax;
-//    f->eax = -1;
-//    return;
-//   }
 
-//   // page directory base address
-// //   uintptr_t pdb_addr;
-//   uint32_t* pd_addr;
-//   // get page directory base address from CR3
-//   asm volatile("movl %%cr3, %0" : "=r"(pd_addr));
-// //   uintptr_t pd_idx = pd_no(fault_addr);
-// //   uint32_t *pd_addr = pdb_addr + pd_idx;
-// //   void *page_addr = pagedir_get_page (pd_addr, fault_addr);
-//   void *page_addr = pagedir_get_page (pd_addr, fault_addr);
-//   // return if FAULT_ADDR is an unmapped pointer
-//   if (page_addr == NULL) {
-//    f->eip = (void(*)(void))f->eax;
-//    f->eax = -1;
-//    return;
-//   }
+
 
   /* Turn interrupts back on (they were only off so that we could
      be assured of reading CR2 before it changed). */
@@ -163,6 +160,30 @@ static void page_fault(struct intr_frame* f) {
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
+  // kill the process if it tries to access kernel memory
+  if (user && (fault_addr >= PHYS_BASE)) {
+   f->eax = -1;
+   kill(f);
+  }
+
+
+  /* unmapped memory access */
+  // page directory base address
+  uintptr_t pdb_p_addr;
+  // get page directory base address from CR3
+  asm volatile("movl %%cr3, %0" : "=r"(pdb_p_addr));
+  uintptr_t pdb_v_addr = (uintptr_t)ptov(pdb_p_addr);
+  uintptr_t pd_idx = pd_no(fault_addr);
+  uint32_t *pd_addr = pdb_v_addr + pd_idx;
+  void *page_addr = pagedir_get_page (pd_addr, fault_addr);
+  // kill the process if accessing an unmapped memory
+  if (page_addr == NULL) {
+   f->eax = -1;
+   f->cs = SEL_UCSEG;
+   kill(f);
+  }
+
+
 
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
@@ -175,7 +196,6 @@ static void page_fault(struct intr_frame* f) {
   if (!user) {
    f->eip = (void(*)(void))f->eax;
    f->eax = -1;
-   return;
   }
   // if the page fault is triggered by a user progress, terminate the offending process
   else {

@@ -15,6 +15,9 @@
 #include "userprog/process.h"
 #endif
 
+/* FPU */
+#define SIZE_OF_FPU 108 /* length of state of FPU is 108 bytes */
+
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
@@ -544,9 +547,26 @@ static void schedule(void) {
   ASSERT(cur->status != THREAD_RUNNING);
   ASSERT(is_thread(next));
 
+  // store state of fpu of old thread
+  uint8_t fpu[SIZE_OF_FPU];
+  asm volatile(
+    "fsave %0" 
+    : "=m"(*fpu) 
+    : 
+    : "memory"
+  );
+
   if (cur != next)
     prev = switch_threads(cur, next);
   thread_switch_tail(prev);
+  
+  // restore state of fpu of new thread
+  asm volatile(
+    "frstor %0"
+    :
+    : "m"(*fpu)
+    : "memory"
+  );
 }
 
 /* Returns a tid to use for a new thread. */
