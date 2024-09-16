@@ -8,6 +8,11 @@
 #include "filesys/filesys.h"
 #include "filesys/file.h"
 
+#include "threads/palloc.h"
+#include "userprog/pagedir.h"
+#include "lib/round.h"
+#include "threads/pte.h"
+
 static void syscall_handler(struct intr_frame*);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
@@ -76,6 +81,78 @@ static void syscall_close(int fd) {
   }
 }
 
+/* deallocate PAGE_CNT pages start from address UPAGE */
+static void deallocate_multiple_pages(void* upage, size_t page_cnt) {
+  struct thread* current_thread = thread_current();
+  for (size_t offset = 0; offset < page_cnt; ++offset) {
+    void *upage_mapped = (void*)((uint32_t)upage + offset * PGSIZE);
+    void *kpage_mapped = pagedir_get_page(current_thread->pagedir, upage_mapped);
+    if (kpage_mapped != NULL) {
+      palloc_free_page(kpage_mapped);
+      // set pte as 0 value indicating that the page is not present
+      uint32_t *pde = (uint32_t*)current_thread->pagedir + pd_no(upage_mapped);
+      uint32_t *pt = pde_get_pt(*pde);
+      uint32_t *pte = pt + pt_no(upage_mapped);
+      *pte = 0;
+    }
+  }
+}
+
+static void* syscall_sbrk(intptr_t increment) {
+  // homework 4 memory
+  struct thread* current_thread = thread_current();
+
+  void* previous_brk = current_thread->brk_;
+  if (increment == 0) {
+    return previous_brk;
+  }
+
+  void* new_brk = (void*)((intptr_t)current_thread->brk_ + increment);
+
+  // make sure the heap is located above the process's code and other data loaded from the executable
+  if ((uint32_t)new_brk < (uint32_t)current_thread->start_of_heap_) {
+    return (void*)-1;
+  }
+
+
+  // allocate memory if positive
+  if (increment > 0) {
+    // size_t page_cnt = (uint32_t)new_brk / PGSIZE - (uint32_t)previous_brk / PGSIZE;
+    size_t page_cnt = (ROUND_UP((uint32_t)new_brk, PGSIZE) - ROUND_UP((uint32_t)previous_brk, PGSIZE)) / PGSIZE;
+    for (size_t idx = 0; idx < page_cnt; ++idx) {
+      void* kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+      // undo previous page allocation if the user memory pool is exhausted
+      if (kpage == NULL) {
+        deallocate_multiple_pages((void*)ROUND_UP((uint32_t)previous_brk, PGSIZE), idx);
+        return (void*)-1;
+      }
+
+      void* upage = (void*)(ROUND_UP((uint32_t)previous_brk, PGSIZE) + idx * PGSIZE);
+      // undo previous page allocation if the user address has been mapped
+      if (pagedir_get_page(current_thread->pagedir, upage) != NULL) {
+        deallocate_multiple_pages((void*)ROUND_UP((uint32_t)previous_brk, PGSIZE), idx + 1);
+        return (void*)-1;
+      }
+
+      // map the page into a virtual address space
+      bool success = pagedir_set_page(current_thread->pagedir, upage, kpage, true);
+      if (!success) {
+        deallocate_multiple_pages((void*)ROUND_UP((uint32_t)previous_brk, PGSIZE), idx + 1);
+        return (void*)-1;
+      }
+    }
+  }
+  // deallocate memory if negative
+  else {
+    // size_t page_cnt = (uint32_t)previous_brk / PGSIZE - (uint32_t)new_brk / PGSIZE;
+    size_t page_cnt = (ROUND_UP((uint32_t)previous_brk, PGSIZE) - ROUND_UP((uint32_t)new_brk, PGSIZE)) / PGSIZE;
+    deallocate_multiple_pages((void*)ROUND_UP((uint32_t)new_brk, PGSIZE), page_cnt);
+  }
+
+  current_thread->brk_ = new_brk;
+  return previous_brk;
+}
+
 static void syscall_handler(struct intr_frame* f) {
   uint32_t* args = (uint32_t*)f->esp;
   struct thread* t = thread_current();
@@ -109,6 +186,11 @@ static void syscall_handler(struct intr_frame* f) {
     case SYS_CLOSE:
       validate_buffer_in_user_region(&args[1], sizeof(uint32_t));
       syscall_close((int)args[1]);
+      break;
+    
+    case SYS_SBRK:
+      validate_buffer_in_user_region(&args[1], sizeof(intptr_t));
+      f->eax = (uint32_t)syscall_sbrk((intptr_t)args[1]);
       break;
 
     default:

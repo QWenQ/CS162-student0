@@ -28,7 +28,10 @@ enum {
   SYS_MKDIR,   /* Create a directory. */
   SYS_READDIR, /* Reads a directory entry. */
   SYS_ISDIR,   /* Tests if a fd represents a directory. */
-  SYS_INUMBER  /* Returns the inode number for a fd. */
+  SYS_INUMBER,  /* Returns the inode number for a fd. */
+
+  /* Homework 4 only*/
+  SYS_SBRK /* change data segment size */
 };
 
 #endif /* lib/syscall-nr.h */

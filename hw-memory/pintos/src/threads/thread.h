@@ -101,6 +101,11 @@ struct thread {
   bool in_syscall;        /* Stores if we are in a syscall. */
 #endif
 
+
+  /* heap manage */
+  void* start_of_heap_; /* start address of the heap(inclusively) */
+  void* brk_; /* end of the heap(exclusively) */
+
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
 };

@@ -269,11 +269,16 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
           }
           if (!load_segment(file, file_page, (void*)mem_page, read_bytes, zero_bytes, writable))
             goto done;
+          
+          // homework 4 memory: update start of the heap(above the code and other data segments) and the start address is page-aligned
+          t->start_of_heap_ = ROUND_UP(mem_page + read_bytes + zero_bytes, PGSIZE);
         } else
           goto done;
         break;
     }
   }
+  // homework 4 memory: initialize heap break of the process
+  t->brk_ = t->start_of_heap_;
 
   /* Set up stack. */
   if (!setup_stack(esp))
