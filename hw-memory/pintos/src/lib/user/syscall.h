@@ -48,6 +48,11 @@ bool isdir(int fd);
 int inumber(int fd);
 
 /* Homework 4. */
+/**
+ * change data segment size
+ * @param INCREMENT the size the heap should be changed
+ * @return previous heap break if success or (void*)-1
+*/
 void* sbrk(intptr_t increment);
 
 #endif /* lib/user/syscall.h */

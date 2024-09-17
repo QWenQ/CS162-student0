@@ -36,6 +36,10 @@ int main() {
   int* data = mm_malloc(sizeof(int));
   assert(data != NULL);
   data[0] = 0x162;
+  data = mm_realloc(data, sizeof(int));
+  if (data) {
+    assert(data[0] == 0x162);
+  }
   mm_free(data);
   puts("malloc test successful!");
 }

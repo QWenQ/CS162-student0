@@ -4,14 +4,17 @@ TEST_LDFLAGS=-ldl
 
 all: hw3lib.so mm_test
 
-hw3lib.so: mm_alloc.o
+hw3lib.so: mm_alloc.o list.o
 	gcc -shared -o $@ $^
 
 mm_alloc.o: mm_alloc.c
+	gcc $(CFLAGS) -c -o $@ $^
+
+list.o: list.c
 	gcc $(CFLAGS) -c -o $@ $^
 
 mm_test: mm_test.c
 	gcc $(CFLAGS) $(TEST_CFLAGS) -o $@ $^ $(TEST_LDFLAGS)
 
 clean:
-	rm -rf hw3lib.so mm_alloc.o mm_test
+	rm -rf hw3lib.so mm_alloc.o list.o mm_test
