@@ -93,6 +93,8 @@ struct thread {
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
 
+  int64_t wake_up_ticks_; /* time point when the thread will be woke up if the thread is sleeping */
+
 #ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */
@@ -140,6 +142,9 @@ void thread_yield(void);
 /* Performs some operation on thread t, given auxiliary data AUX. */
 typedef void thread_action_func(struct thread* t, void* aux);
 void thread_foreach(thread_action_func*, void*);
+
+// reschedule if new thread is added to the prio_ready_list
+void update_running_thread_if_prio_sche_on(struct thread* t);
 
 int thread_get_priority(void);
 void thread_set_priority(int);

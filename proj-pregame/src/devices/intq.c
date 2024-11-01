@@ -86,6 +86,7 @@ static void signal(struct intq* q UNUSED, struct thread** waiter) {
 
   if (*waiter != NULL) {
     thread_unblock(*waiter);
+    update_running_thread_if_prio_sche_on(*waiter);
     *waiter = NULL;
   }
 }

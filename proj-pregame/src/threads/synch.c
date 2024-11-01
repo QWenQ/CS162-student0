@@ -32,6 +32,19 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+
+static struct thread* get_highest_priority_thread(struct list* waiters) {
+  struct thread* highest_prio_thread = NULL;
+  struct list_elem* e = NULL;
+  for (e = list_begin(waiters); e != list_end(waiters); e = list_next(e)) {
+    struct thread* entry = list_entry(e, struct thread, elem);
+    if (highest_prio_thread == NULL || entry->priority > highest_prio_thread->priority) {
+      highest_prio_thread = entry;
+    }
+  }
+  return highest_prio_thread;
+}
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -102,8 +115,16 @@ void sema_up(struct semaphore* sema) {
   ASSERT(sema != NULL);
 
   old_level = intr_disable();
-  if (!list_empty(&sema->waiters))
-    thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+  if (!list_empty(&sema->waiters)) {
+    if (active_sched_policy == SCHED_FIFO) {
+      thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+    }
+    else if (active_sched_policy == SCHED_PRIO) {
+      struct thread* t = get_highest_priority_thread(&sema->waiters);
+      thread_unblock(t);
+      update_running_thread_if_prio_sche_on(t);
+    }
+  }
   sema->value++;
   intr_set_level(old_level);
 }
@@ -320,7 +341,23 @@ void cond_wait(struct condition* cond, struct lock* lock) {
   ASSERT(lock_held_by_current_thread(lock));
 
   sema_init(&waiter.semaphore, 0);
-  list_push_back(&cond->waiters, &waiter.elem);
+  if (active_sched_policy == SCHED_FIFO) {
+    list_push_back(&cond->waiters, &waiter.elem);
+  }
+  else if (active_sched_policy == SCHED_PRIO) {
+    // condition variable maintains an ordered waiter list sorted by the thread's priority decreasingly
+    struct thread* cur_thread = thread_current();
+    struct list_elem* e = NULL;
+    for (e = list_begin(&cond->waiters); e != list_end(&cond->waiters); e = list_next(e)) {
+      struct semaphore_elem* se = list_entry(e, struct semaphore_elem, elem);
+      struct thread* t = list_entry(list_front(&(se->semaphore.waiters)), struct thread, elem);
+      if (t->priority < cur_thread->priority) {
+        break;
+      }
+    }
+    list_insert(e, &waiter.elem);
+  }
+
   lock_release(lock);
   sema_down(&waiter.semaphore);
   lock_acquire(lock);

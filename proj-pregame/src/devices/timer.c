@@ -7,6 +7,7 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include "lib/string.h"
 
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -23,6 +24,15 @@ static int64_t ticks;
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
+
+/*list containning sleeping threads ordered by their wake up point increasingly */
+static struct list sleep_threads = LIST_INITIALIZER(sleep_threads);
+
+/* push thread into a queue in low-to-high priority order */
+static void push_thread_into_priority_queue(struct list* priority_que, struct thread* thread);
+
+/* wake up sleeping threads if necessary */
+static void wake_up_sleeping_threads(void);
 
 static intr_handler_func timer_interrupt;
 static bool too_many_loops(unsigned loops);
@@ -76,11 +86,32 @@ int64_t timer_elapsed(int64_t then) { return timer_ticks() - then; }
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void timer_sleep(int64_t ticks) {
+  if (ticks < 1) return;
+
   int64_t start = timer_ticks();
 
-  ASSERT(intr_get_level() == INTR_ON);
-  while (timer_elapsed(start) < ticks)
-    thread_yield();
+  struct thread* cur_thread = thread_current();
+  cur_thread->wake_up_ticks_ = start + ticks;
+
+  // push current thread into sleeping queue in increasing order of wake up ticks
+  enum intr_level old_level = intr_disable();
+  ASSERT(intr_get_level() == INTR_OFF);
+
+  struct list_elem* e = NULL;
+  for (e = list_begin(&sleep_threads); e != list_end(&sleep_threads); e = list_next(e)) {
+    struct thread* thread_in_sleeping = list_entry(e, struct thread, elem);
+    if (thread_in_sleeping->wake_up_ticks_ >= cur_thread->wake_up_ticks_) {
+      break;
+    }
+  }
+  list_insert(e, &cur_thread->elem);
+
+  thread_block();
+  intr_set_level(old_level);
+
+  // ASSERT(intr_get_level() == INTR_ON);
+  // while (timer_elapsed(start) < ticks)
+  //   thread_yield();
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -125,9 +156,71 @@ void timer_ndelay(int64_t ns) { real_time_delay(ns, 1000 * 1000 * 1000); }
 /* Prints timer statistics. */
 void timer_print_stats(void) { printf("Timer: %" PRId64 " ticks\n", timer_ticks()); }
 
+/* push thread into a queue in low-to-high priority order */
+static void push_thread_into_priority_queue(struct list* priority_que, struct thread* thread) {
+  struct list_elem* e = NULL;
+  for (e = list_begin(priority_que); e != list_end(priority_que); e = list_next(e)) {
+    struct thread* cur_thread = list_entry(e, struct thread, elem);
+    if (cur_thread->priority >= thread->priority) {
+      break;
+    }
+  }
+  list_insert(e, &thread->elem);
+}
+
+/* wake up sleeping threads if necessary */
+static void wake_up_sleeping_threads(void) {
+  // low-to-high priority order
+  struct list priority_que;
+  list_init(&priority_que);
+  size_t cnt_wake_ups = 0;
+  struct list_elem* e = NULL;
+  while (!list_empty(&sleep_threads)) {
+    e = list_front(&sleep_threads);
+    struct thread* thread_to_be_woken_up = list_entry(e, struct thread, elem);
+    if (thread_to_be_woken_up->wake_up_ticks_ > ticks) {
+      // wake up one sleeping thread if the system is idle
+
+      // struct thread* cur_thread = thread_current();
+      // if ((strcmp(cur_thread->name, "idle") == 0) && (cnt_wake_ups == 0)) {
+      //   list_pop_front(&sleep_threads);
+      //   push_thread_into_priority_queue(&priority_que, thread_to_be_woken_up);
+      //   ++cnt_wake_ups;
+      // }
+      break;
+    }
+    list_pop_front(&sleep_threads);
+    push_thread_into_priority_queue(&priority_que, thread_to_be_woken_up);
+    ++cnt_wake_ups;
+  }
+
+  e = NULL;
+
+  // printf("ticks = %llu wake up threads:%d\n", ticks, cnt_wake_ups);
+  // printf("priority queue size: %d\n", list_size(&priority_que));
+  
+  while (!list_empty(&priority_que)) {
+    e = list_pop_back(&priority_que);
+    struct thread* thread_woken_up = list_entry(e, struct thread, elem);
+
+    // printf("thread id:%d\nname: %s\npriority: %d\nmagic: %u\n\n", 
+    //         thread_woken_up->tid,
+    //         thread_woken_up->name, 
+    //         thread_woken_up->priority, 
+    //         thread_woken_up->magic
+    // );
+
+    thread_unblock(thread_woken_up); 
+    update_running_thread_if_prio_sche_on(thread_woken_up);
+  }
+}
+
 /* Timer interrupt handler. */
 static void timer_interrupt(struct intr_frame* args UNUSED) {
   ticks++;
+
+  wake_up_sleeping_threads();
+  
   thread_tick();
 }
 
