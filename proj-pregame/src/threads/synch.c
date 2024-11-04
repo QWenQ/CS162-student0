@@ -38,9 +38,13 @@ static struct thread* get_highest_priority_thread(struct list* waiters) {
   struct list_elem* e = NULL;
   for (e = list_begin(waiters); e != list_end(waiters); e = list_next(e)) {
     struct thread* entry = list_entry(e, struct thread, elem);
-    if (highest_prio_thread == NULL || entry->priority > highest_prio_thread->priority) {
+    int entry_priority = get_effective_priority(entry);
+    if ((highest_prio_thread == NULL) || (entry_priority > get_effective_priority(highest_prio_thread))) {
       highest_prio_thread = entry;
     }
+  }
+  if (highest_prio_thread != NULL) {
+    list_remove(&highest_prio_thread->elem);
   }
   return highest_prio_thread;
 }
@@ -115,17 +119,31 @@ void sema_up(struct semaphore* sema) {
   ASSERT(sema != NULL);
 
   old_level = intr_disable();
+  sema->value++;
+  struct thread* t = NULL;
   if (!list_empty(&sema->waiters)) {
     if (active_sched_policy == SCHED_FIFO) {
       thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
     }
     else if (active_sched_policy == SCHED_PRIO) {
-      struct thread* t = get_highest_priority_thread(&sema->waiters);
+      t = get_highest_priority_thread(&sema->waiters);
+      ASSERT(t->status == THREAD_BLOCKED);
       thread_unblock(t);
-      update_running_thread_if_prio_sche_on(t);
+      struct thread* cur_thread = thread_current();
+      // schedule if a highest priority thread is ready when priority schedule policy is on
+      int t_priority = get_effective_priority(t);
+      // int cur_t_priority = thread_get_priority();
+      int cur_t_priority = get_effective_priority(cur_thread);
+      if (t_priority > cur_t_priority) {
+        if (intr_context()) {
+          intr_yield_on_return();
+        }
+        else {
+          thread_yield();
+        }
+      }
     }
   }
-  sema->value++;
   intr_set_level(old_level);
 }
 
@@ -195,7 +213,27 @@ void lock_acquire(struct lock* lock) {
   ASSERT(!intr_context());
   ASSERT(!lock_held_by_current_thread(lock));
 
+  struct thread* cur_thread = thread_current();
+
+
+  // donate high priority to thread with low priority if the lock is held by another thread
+  enum intr_level old_level = intr_disable();
+  if (lock->holder != NULL) {
+    cur_thread->blocked_on_lock_ = lock;
+
+    if (active_sched_policy == SCHED_PRIO) {
+      int cur_t_priority = thread_get_priority();
+      donate_priority(cur_t_priority, lock);
+    }
+  }
+  intr_set_level(old_level);
+
   sema_down(&lock->semaphore);
+
+  if (cur_thread->blocked_on_lock_ == lock) {
+    cur_thread->blocked_on_lock_ = NULL;
+  }
+
   lock->holder = thread_current();
 }
 
@@ -217,6 +255,23 @@ bool lock_try_acquire(struct lock* lock) {
   return success;
 }
 
+/* if the donation node associated with the LOCK exists, remove it from the donation list */
+static void check_and_update_donation_chain(struct lock* lock) {
+  ASSERT(lock != NULL);
+  ASSERT(lock_held_by_current_thread(lock));
+  struct thread* cur_thread = lock->holder;
+  struct list_elem* e = NULL;
+  for (e = list_begin(&cur_thread->donated_list_); e != list_end(&cur_thread->donated_list_); e = list_next(e)) {
+    struct donated_list_elem* donated_entry = list_entry(e, struct donated_list_elem, elem_);
+    if (donated_entry->donated_lock_ == lock) {
+      list_remove(e);
+      free(donated_entry);
+      break;
+    }
+  }
+  
+}
+
 /* Releases LOCK, which must be owned by the current thread.
 
    An interrupt handler cannot acquire a lock, so it does not
@@ -225,6 +280,8 @@ bool lock_try_acquire(struct lock* lock) {
 void lock_release(struct lock* lock) {
   ASSERT(lock != NULL);
   ASSERT(lock_held_by_current_thread(lock));
+
+  check_and_update_donation_chain(lock);
 
   lock->holder = NULL;
   sema_up(&lock->semaphore);
@@ -351,7 +408,10 @@ void cond_wait(struct condition* cond, struct lock* lock) {
     for (e = list_begin(&cond->waiters); e != list_end(&cond->waiters); e = list_next(e)) {
       struct semaphore_elem* se = list_entry(e, struct semaphore_elem, elem);
       struct thread* t = list_entry(list_front(&(se->semaphore.waiters)), struct thread, elem);
-      if (t->priority < cur_thread->priority) {
+      int t_priority = get_effective_priority(t);
+      // int cur_t_priority = thread_get_priority();
+      int cur_t_priority = get_effective_priority(cur_thread);
+      if (t_priority < cur_t_priority) {
         break;
       }
     }

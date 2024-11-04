@@ -25,6 +25,13 @@ typedef int tid_t;
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63     /* Highest priority. */
 
+/* list element of donated lock list */
+struct donated_list_elem {
+  int donated_priority_;  /* max priority of current donation chain */
+  struct lock* donated_lock_; /* the lock associated with donated priority */
+  struct list_elem elem_;
+};
+
 /* A kernel thread or user process.
 
    Each thread structure is stored in its own 4 kB page.  The
@@ -95,6 +102,11 @@ struct thread {
 
   int64_t wake_up_ticks_; /* time point when the thread will be woke up if the thread is sleeping */
 
+  // for priority schedule
+  struct list donated_list_; /* ordered by donated priorities decreasingly */
+  struct lock* blocked_on_lock_; /* lock where the thread is blocked */
+
+
 #ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */
@@ -147,7 +159,10 @@ void thread_foreach(thread_action_func*, void*);
 void update_running_thread_if_prio_sche_on(struct thread* t);
 
 int thread_get_priority(void);
+int get_effective_priority(struct thread* t);
 void thread_set_priority(int);
+
+void donate_priority(int priority, struct lock* lock);
 
 int thread_get_nice(void);
 void thread_set_nice(int);

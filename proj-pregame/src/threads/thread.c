@@ -247,7 +247,9 @@ static void thread_enqueue(struct thread* t) {
     struct list_elem* before = NULL;
     for (before = list_begin(&prio_ready_list); before != list_end(&prio_ready_list); before = list_next(before)) {
       struct thread* entry = list_entry(before, struct thread, elem);
-      if (entry->priority < t->priority) {
+      int entry_priority = get_effective_priority(entry);
+      int t_priority = get_effective_priority(t); 
+      if (entry_priority < t_priority) {
         break;
       }
     }
@@ -345,11 +347,16 @@ void thread_foreach(thread_action_func* func, void* aux) {
   }
 }
 
-// reschedule if new thread is added to the prio_ready_list
+/**
+ * if new ready thread is prior than the running one, schedule the execution
+ * @param t a new ready thread should be in ready list already
+*/
 void update_running_thread_if_prio_sche_on(struct thread* t) {
   if (active_sched_policy == SCHED_PRIO) {
-    struct thread* cur_thread = thread_current();
-    if (t->priority > cur_thread->priority) {
+    int t_priority = get_effective_priority(t);
+    // int cur_t_priority = thread_get_priority();
+    int cur_t_priority = get_effective_priority(thread_current());
+    if (t_priority > cur_t_priority) {
       thread_yield();
     }
   }
@@ -357,23 +364,101 @@ void update_running_thread_if_prio_sche_on(struct thread* t) {
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void thread_set_priority(int new_priority) { 
-  thread_current()->priority = new_priority; 
+  struct thread* cur_thread = thread_current(); 
+  cur_thread->priority = new_priority;
 
   // lowering thread's priority may cause the thread to immediately yield the CPU 
   // if the thread's priority is not highest after updated
   if (!list_empty(&prio_ready_list)) {
     struct thread* highest_prio_ready_thread = list_entry(list_front(&prio_ready_list), struct thread, elem);
-    if (highest_prio_ready_thread->priority > new_priority) {
+    // int cur_t_priority = thread_get_priority();
+    int cur_t_priority = get_effective_priority(cur_thread);
+    int h_p_r_t_priority = get_effective_priority(highest_prio_ready_thread);
+    if (h_p_r_t_priority > cur_t_priority) {
       thread_yield();
     }
   }
 }
 
+/* get effective priority of thread T */
+int get_effective_priority(struct thread* t) {
+  // return (t->donated_priority_ == -1) ? t->priority : t->donated_priority_;
+  if (!list_empty(&t->donated_list_)) {
+    struct list_elem* e = list_front(&t->donated_list_);
+    struct donated_list_elem* donated_entry = list_entry(e, struct donated_list_elem, elem_);
+    return donated_entry->donated_priority_;
+  }
+  return t->priority;
+}
+
 /* Returns the current thread's priority. */
-int thread_get_priority(void) { return thread_current()->priority; }
+int thread_get_priority(void) { 
+  struct thread* cur_thread = thread_current();
+  return get_effective_priority(cur_thread);
+}
+
+/* update donation PRIORITY along the donation chain associated with LOCK if the path exists */
+static bool update_donated_priority_in_place(int priority, struct lock* lock) {
+  ASSERT(intr_get_level() == INTR_OFF);
+  bool success = false;
+
+  struct thread* holder = lock->holder;
+  struct list_elem* e = NULL;
+  for (e = list_begin(&holder->donated_list_); e != list_end(&holder->donated_list_); e = list_next(e)) {
+    struct donated_list_elem* donated_entry = list_entry(e, struct donated_list_elem, elem_);
+    if (donated_entry->donated_lock_ == lock) {
+      donated_entry->donated_priority_ = priority;
+      success = true;
+      break;
+    }
+  }
+  return success;
+}
+
+/* create a new donation path for LOCK holder with new donation PRIORITY */
+static void insert_new_donated_node(int priority, struct lock* lock) {
+  ASSERT(intr_get_level() == INTR_OFF);
+  struct thread* holder = lock->holder;
+
+  struct donated_list_elem* new_donated_node = (struct donated_list_elem*)malloc(sizeof (struct donated_list_elem));
+  new_donated_node->donated_lock_ = lock;
+  new_donated_node->donated_priority_ = priority;
+
+  struct list_elem* e = NULL;
+  for (e = list_begin(&holder->donated_list_); e != list_end(&holder->donated_list_); e = list_next(e)) {
+    struct donated_list_elem* donated_entry = list_entry(e, struct donated_list_elem, elem_);
+    if (donated_entry->donated_priority_ < priority) {
+      break;
+    }
+  }
+
+  list_insert(e, &new_donated_node->elem_);
+}
+
+/* update donation PRIORITY along the donation chain associated with LOCK */
+static void update_donated_priority(int priority, struct lock* lock) {
+  bool success = update_donated_priority_in_place(priority, lock);
+  if (!success) {
+    insert_new_donated_node(priority, lock);
+  }
+}
+
+
+/* donate PRIORITY associated with LOCK to the thread holding LOCK recursively */
+void donate_priority(int priority, struct lock* lock) {
+  ASSERT(intr_get_level() == INTR_OFF);
+  // edge case
+  // if ((lock == NULL) || (lock->holder->status != THREAD_BLOCKED)) return;
+  if (lock == NULL) return;
+
+  update_donated_priority(priority, lock);
+
+  // update donated priority along the donation chain
+  donate_priority(priority, lock->holder->blocked_on_lock_);
+}
 
 /* Sets the current thread's nice value to NICE. */
-void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */
+void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */ 
 }
 
 /* Returns the current thread's nice value. */
@@ -468,6 +553,8 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->stack = (uint8_t*)t + PGSIZE;
   t->priority = priority;
   t->pcb = NULL;
+  list_init(&t->donated_list_);
+  t->blocked_on_lock_ = NULL;
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable();
