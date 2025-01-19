@@ -125,15 +125,13 @@ void sema_up(struct semaphore* sema) {
     if (active_sched_policy == SCHED_FIFO) {
       thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
     }
-    else if (active_sched_policy == SCHED_PRIO) {
+    else if ((active_sched_policy == SCHED_PRIO) || (active_sched_policy == SCHED_MLFQS)) {
       t = get_highest_priority_thread(&sema->waiters);
       ASSERT(t->status == THREAD_BLOCKED);
       thread_unblock(t);
-      struct thread* cur_thread = thread_current();
       // schedule if a highest priority thread is ready when priority schedule policy is on
       int t_priority = get_effective_priority(t);
-      // int cur_t_priority = thread_get_priority();
-      int cur_t_priority = get_effective_priority(cur_thread);
+      int cur_t_priority = thread_get_priority();
       if (t_priority > cur_t_priority) {
         if (intr_context()) {
           intr_yield_on_return();
@@ -401,16 +399,14 @@ void cond_wait(struct condition* cond, struct lock* lock) {
   if (active_sched_policy == SCHED_FIFO) {
     list_push_back(&cond->waiters, &waiter.elem);
   }
-  else if (active_sched_policy == SCHED_PRIO) {
+  else if ((active_sched_policy == SCHED_PRIO) || (active_sched_policy == SCHED_MLFQS)) {
     // condition variable maintains an ordered waiter list sorted by the thread's priority decreasingly
-    struct thread* cur_thread = thread_current();
     struct list_elem* e = NULL;
     for (e = list_begin(&cond->waiters); e != list_end(&cond->waiters); e = list_next(e)) {
       struct semaphore_elem* se = list_entry(e, struct semaphore_elem, elem);
       struct thread* t = list_entry(list_front(&(se->semaphore.waiters)), struct thread, elem);
       int t_priority = get_effective_priority(t);
-      // int cur_t_priority = thread_get_priority();
-      int cur_t_priority = get_effective_priority(cur_thread);
+      int cur_t_priority = thread_get_priority();
       if (t_priority < cur_t_priority) {
         break;
       }

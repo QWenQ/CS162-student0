@@ -173,7 +173,9 @@ static void timer_interrupt(struct intr_frame* args UNUSED) {
   ticks++;
 
   wake_up_sleeping_threads();
-  
+
+  update_mlfqs_info_if_mlfqs_on(ticks, TIMER_FREQ);
+
   thread_tick();
 }
 

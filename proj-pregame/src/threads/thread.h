@@ -106,6 +106,10 @@ struct thread {
   struct list donated_list_; /* ordered by donated priorities decreasingly */
   struct lock* blocked_on_lock_; /* lock where the thread is blocked */
 
+  // for multilevel feedback queue schedule
+  int nice_; /* intention to release CPU times */
+  fixed_point_t recent_cpu_; /* a real number: how much CPU time received recently */
+
 
 #ifdef USERPROG
   /* Owned by process.c. */
@@ -168,5 +172,7 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
+
+void update_mlfqs_info_if_mlfqs_on(int64_t ticks, int64_t timer_freq);
 
 #endif /* threads/thread.h */
