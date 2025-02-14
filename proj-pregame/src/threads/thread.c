@@ -240,8 +240,11 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
 
   /* Allocate thread. */
   t = palloc_get_page(PAL_ZERO);
-  if (t == NULL)
+  if (t == NULL) {
+    // debug
+    void;
     return TID_ERROR;
+  }
 
   /* Initialize thread. */
   init_thread(t, name, priority);
@@ -316,17 +319,6 @@ static void thread_enqueue(struct thread* t) {
   if (active_sched_policy == SCHED_FIFO)
     list_push_back(&fifo_ready_list, &t->elem);
   else if (active_sched_policy == SCHED_PRIO) {
-    // struct list_elem* before = NULL;
-    // for (before = list_begin(&prio_ready_list); before != list_end(&prio_ready_list); before = list_next(before)) {
-    //   struct thread* entry = list_entry(before, struct thread, elem);
-    //   int entry_priority = get_effective_priority(entry);
-    //   int t_priority = get_effective_priority(t); 
-    //   if (entry_priority < t_priority) {
-    //     break;
-    //   }
-    // }
-    // list_insert(before, &t->elem);
-
     insert_into_decreasing_list(&prio_ready_list, t);
   }
   else if (active_sched_policy == SCHED_MLFQS) {
@@ -743,6 +735,14 @@ static void init_thread(struct thread* t, const char* name, int priority) {
 
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
+
+  /* initialize user program fields */
+  // default value
+  t->exit_status_ = 0; 
+
+  /* initialize user thread fields */
+  t->p_user_stack_addr_ = NULL;
+
   intr_set_level(old_level);
 }
 

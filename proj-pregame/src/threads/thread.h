@@ -110,6 +110,11 @@ struct thread {
   int nice_; /* intention to release CPU times */
   fixed_point_t recent_cpu_; /* a real number: how much CPU time received recently */
 
+  /* user program fields */
+  int exit_status_; // exit status of process
+
+  /* user thread fields */
+  uint8_t* p_user_stack_addr_; // the stack address in the user space
 
 #ifdef USERPROG
   /* Owned by process.c. */

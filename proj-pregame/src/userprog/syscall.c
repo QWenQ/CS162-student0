@@ -5,8 +5,7 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "userprog/process.h"
-
-// #include "filesys/off_t.h"
+// #include "user/syscall.h"
 
 #define PHYS_BASE 0xc0000000 /* 3 GB. */
 
@@ -116,23 +115,8 @@ void sys_exit(struct intr_frame* f UNUSED) {
     f->eax = args[1];
   }
 
-  // update the exit status to the parent
   struct thread *cur_thread = thread_current();
-  if (cur_thread->pcb != NULL) {
-    struct process *cur_process = cur_thread->pcb;
-    struct process *parent = cur_process->parent_;
-    if (parent) {
-      struct list_elem *e = NULL;
-      for (e = list_begin(&parent->child_exec_info_list_); e != list_end(&parent->child_exec_info_list_); e = list_next(e)) {
-        struct execution_info *exec_info = list_entry(e, struct execution_info, elem_);
-        if (exec_info->child_pid_ == cur_thread->tid) {
-          exec_info->exit_status_ = args[1];
-          sema_up(&exec_info->ready_to_die_);
-          break;
-        }
-      }
-    }
-  }
+  cur_thread->exit_status_ = args[1];
 
   printf("%s: exit(%d)\n", thread_current()->pcb->process_name, f->eax);
   process_exit();
@@ -421,81 +405,199 @@ void sys_compute_e(struct intr_frame* f UNUSED) {
   );
 }
 
-// TODO
 void sys_pt_create(struct intr_frame* f UNUSED) {
   // signature: tid_t sys_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_error(f, (uint8_t*)(args + 1), true);
   exit_if_error(f, (uint8_t*)(args + 2), true);
   exit_if_error(f, (uint8_t*)(args + 3), true);
+
   stub_fun sfun = (stub_fun)args[1];
   pthread_fun tfun = (pthread_fun)args[2];
-  const void* arg = (const void*)args[3];
-
-  tid_t tid = thread_create("", PRI_DEFAULT, sfun, (void*)(args + 1));
+  const void* tfun_arg = (void*)args[3];
+  f->eax = pthread_execute(sfun, tfun, tfun_arg);
 }
 
-// TODO
 void sys_pt_exit(struct intr_frame* f UNUSED) {
   // signature: void sys_pthread_exit(void) NO_RETURN;
   uint32_t* args = ((uint32_t*)f->esp);
-
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  if (pcb == NULL) return;
+  if (pcb->main_thread == cur_thread) {
+    // main thread exits
+    pthread_exit_main();
+  }
+  else {
+    // non-main thread exits
+    pthread_exit();
+  }
 }
 
-// TODO
 void sys_pt_join(struct intr_frame* f UNUSED) {
   // signature: tid_t sys_pthread_join(tid_t tid);
   uint32_t* args = ((uint32_t*)f->esp);
-
+  tid_t join_tid = (tid_t)args[1];
+  tid_t ret_tid = pthread_join(join_tid); 
+  f->eax = ret_tid;
 }
 
-// TODO
+
 void sys_lock_init(struct intr_frame* f UNUSED) {
-  // signature: bool lock_init(lock_t* lock);
+  // signature: bool lock_init(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
+  char* lock_id_ptr = (char*)args[1];
+  if (lock_id_ptr == NULL) {
+    f->eax = false;
+    return;
+  }
+  struct thread* current_thread = thread_current();
+  struct process* pcb = current_thread->pcb;
+  if (pcb == NULL) {
+    f->eax = false;
+    return;
+  }
 
+  bool success = false;
+  // critical section
+  rw_lock_acquire(&(pcb->rw_on_locks_), false);
+  for (int i = 0; i < USER_LOCK_SIZE; ++i) {
+    if (pcb->locks_[i] != NULL) continue;
+    pcb->locks_[i] = (struct lock*)malloc(sizeof(struct lock)); 
+    if (pcb->locks_[i] == NULL) break;
+    lock_init(pcb->locks_[i]);
+    success = true;
+    *lock_id_ptr = (char)i;
+    break;
+  }
+  rw_lock_release(&(pcb->rw_on_locks_), false);
+  f->eax = success;
 }
 
-// TODO
 void sys_lock_acquire(struct intr_frame* f UNUSED) {
-  // signature: void lock_acquire(lock_t* lock);
+  // signature: void lock_acquire(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
+  uint8_t lock_id = *(char*)args[1];
+  bool success = false;
+  struct thread* current_thread = thread_current();
+  struct process* pcb = current_thread->pcb;
 
+  rw_lock_acquire(&(pcb->rw_on_locks_), true);
+  if ((pcb != NULL) && (pcb->locks_[lock_id] != NULL)) {
+    if (!lock_held_by_current_thread(pcb->locks_[lock_id])) {
+      success = lock_try_acquire(pcb->locks_[lock_id]);
+      if (!success) {
+        rw_lock_release(&(pcb->rw_on_locks_), true);
+        lock_acquire(pcb->locks_[lock_id]);
+        success = true;
+      }
+      else {
+        rw_lock_release(&(pcb->rw_on_locks_), true);
+      }
+    }
+  }
+  f->eax = success;
 }
 
-// TODO
 void sys_lock_release(struct intr_frame* f UNUSED) {
-  // signature: void lock_release(lock_t* lock);
+  // signature: void lock_release(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
+  uint8_t lock_id = *(char*)args[1];
+  struct thread* current_thread = thread_current();
+  struct process* pcb = current_thread->pcb;
 
+  bool success = false;
+  rw_lock_acquire(&(pcb->rw_on_locks_), true);
+  if ((pcb != NULL) && (pcb->locks_[lock_id] != NULL)) {
+    if (lock_held_by_current_thread(pcb->locks_[lock_id])) {
+      lock_release(pcb->locks_[lock_id]);
+      success = true;
+    }
+  }
+  rw_lock_release(&(pcb->rw_on_locks_), true);
+  f->eax = success;
 }
 
-// TODO
 void sys_sema_init(struct intr_frame* f UNUSED) {
-  // signature: bool sema_init(sema_t* sema, int val);
+  // signature: bool sema_init(char* sema, int val);
   uint32_t* args = ((uint32_t*)f->esp);
+  uint8_t* sema_id_ptr = (uint8_t*)args[1];
+  if (sema_id_ptr == NULL) {
+    f->eax = false;
+    return;
+  }
+  int val = (int)args[2];
+  if (val < 0) {
+    f->eax = false;
+    return;
+  }
+  struct thread* current_thread = thread_current();
+  struct process* pcb = current_thread->pcb;
+  if (pcb == NULL) {
+    f->eax = false;
+    return;
+  }
 
+  bool success = false;
+  // critical section
+  rw_lock_acquire(&(pcb->rw_on_semas_), false);
+  for (int i = 0; i < USER_SEMAPHORE_SIZE; ++i) {
+    if (pcb->semas_[i] != NULL) continue;
+    pcb->semas_[i] = (struct semaphore*)malloc(sizeof(struct semaphore)); 
+    if (pcb->semas_[i] == NULL) break;
+    sema_init(pcb->semas_[i], val);
+    *sema_id_ptr = (uint8_t)i;
+    success = true;
+    break;
+  }
+  rw_lock_release(&(pcb->rw_on_semas_), false);
+  f->eax = success;
 }
 
-// TODO
 void sys_sema_down(struct intr_frame* f UNUSED) {
-  // signature: void sema_down(sema_t* sema);
+  // signature: void sema_down(char* sema);
   uint32_t* args = ((uint32_t*)f->esp);
+  uint8_t sema_id = *(uint8_t*)args[1];
+  bool success = false;
+  struct thread* current_thread = thread_current();
+  struct process* pcb = current_thread->pcb;
 
+  rw_lock_acquire(&(pcb->rw_on_semas_), true);
+  if ((pcb != NULL) && (pcb->semas_[sema_id] != NULL)) {
+    success = sema_try_down(pcb->semas_[sema_id]);
+    if (!success) {
+      rw_lock_release(&(pcb->rw_on_semas_), true);
+      sema_down(pcb->semas_[sema_id]);
+      success = true;
+    }
+    else {
+      rw_lock_release(&(pcb->rw_on_semas_), true);
+    }
+  }
+  f->eax = success;
 }
 
-// TODO
 void sys_sema_up(struct intr_frame* f UNUSED) {
-  // signature: void sema_up(sema_t* sema);
+  // signature: void sema_up(char* sema);
   uint32_t* args = ((uint32_t*)f->esp);
+  uint8_t sema_id = *(uint8_t*)args[1];
+  struct thread* current_thread = thread_current();
+  struct process* pcb = current_thread->pcb;
 
+  bool success = false;
+  rw_lock_acquire(&(pcb->rw_on_semas_), true);
+  if ((pcb != NULL) && (pcb->semas_[sema_id] != NULL)) {
+    success = true;
+    sema_up(pcb->semas_[sema_id]);
+  }
+  rw_lock_release(&(pcb->rw_on_semas_), true);
+  f->eax = success;
 }
 
-// TODO
 void sys_get_tid(struct intr_frame* f UNUSED) {
   // signature: tid_t get_tid(void);
-  uint32_t* args = ((uint32_t*)f->esp);
-
+  uint32_t* args UNUSED= ((uint32_t*)f->esp);
+  f->eax = thread_tid();
 }
 
 // template
@@ -511,7 +613,8 @@ void sys_get_tid(struct intr_frame* f UNUSED) {
 
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
-  uint32_t* args = ((uint32_t*)f->esp);
+  // uint32_t* args = ((uint32_t*)f->esp);
+  uint32_t syscall_number = *(uint32_t*)(f->esp);
 
   /*
    * The following print statement, if uncommented, will print out the syscall
@@ -522,79 +625,79 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
   /* printf("System call number: %d\n", args[0]); */
 
-  if (args[0] == SYS_EXIT) {
+  if (syscall_number == SYS_EXIT) {
     sys_exit(f);
   }
-  else if (args[0] == SYS_PRACTICE) {
+  else if (syscall_number == SYS_PRACTICE) {
     sys_practice(f);
   }
-  else if (args[0] == SYS_HALT) {
+  else if (syscall_number == SYS_HALT) {
     sys_halt(f);
   }
-  else if (args[0] == SYS_EXEC) {
+  else if (syscall_number == SYS_EXEC) {
     sys_exec(f);
   }
-  else if (args[0] == SYS_WAIT) {
+  else if (syscall_number == SYS_WAIT) {
     sys_wait(f);
   }
-  else if (args[0] == SYS_CREATE) {
+  else if (syscall_number == SYS_CREATE) {
     sys_create(f);
   }
-  else if (args[0] == SYS_REMOVE) {
+  else if (syscall_number == SYS_REMOVE) {
     sys_remove(f);
   }
-  else if (args[0] == SYS_OPEN) {
+  else if (syscall_number == SYS_OPEN) {
     sys_open(f);
   }
-  else if (args[0] == SYS_FILESIZE) {
+  else if (syscall_number == SYS_FILESIZE) {
     sys_filesize(f);
   }
-  else if (args[0] == SYS_READ) {
+  else if (syscall_number == SYS_READ) {
     sys_read(f);
   }
-  else if (args[0] == SYS_WRITE) {
+  else if (syscall_number == SYS_WRITE) {
     sys_write(f);
   }
-  else if (args[0] == SYS_SEEK) {
+  else if (syscall_number == SYS_SEEK) {
      sys_seek(f);
   }
-  else if (args[0] == SYS_TELL) {
+  else if (syscall_number == SYS_TELL) {
     sys_tell(f);
   }
-  else if (args[0] == SYS_CLOSE) {
+  else if (syscall_number == SYS_CLOSE) {
     sys_close(f);
   }
-  else if (args[0] == SYS_COMPUTE_E) {
+  else if (syscall_number == SYS_COMPUTE_E) {
     sys_compute_e(f);
   }
-  else if (args[0] == SYS_PT_CREATE) {
+  else if (syscall_number == SYS_PT_CREATE) {
     sys_pt_create(f);
   }
-  else if (args[0] == SYS_PT_EXIT) {
+  else if (syscall_number == SYS_PT_EXIT) {
     sys_pt_exit(f);
   }
-  else if (args[0] == SYS_PT_JOIN) {
+  else if (syscall_number == SYS_PT_JOIN) {
     sys_pt_join(f);
   }
-  else if (args[0] == SYS_LOCK_INIT) {
+  else if (syscall_number == SYS_LOCK_INIT) {
     sys_lock_init(f);
   }
-  else if (args[0] == SYS_LOCK_ACQUIRE) {
+  else if (syscall_number == SYS_LOCK_ACQUIRE) {
     sys_lock_acquire(f);
   }
-  else if (args[0] == SYS_LOCK_RELEASE) {
+  else if (syscall_number == SYS_LOCK_RELEASE) {
     sys_lock_release(f);
   }
-  else if (args[0] == SYS_SEMA_INIT) {
+  else if (syscall_number == SYS_SEMA_INIT) {
     sys_sema_init(f);
   }
-  else if (args[0] == SYS_SEMA_DOWN) {
+  else if (syscall_number == SYS_SEMA_DOWN) {
     sys_sema_down(f);
   }
-  else if (args[0] == SYS_SEMA_UP) {
+  else if (syscall_number == SYS_SEMA_UP) {
     sys_sema_up(f);
   }
-  else if (args[0] == SYS_GET_TID) {
+  else if (syscall_number == SYS_GET_TID) {
     sys_get_tid(f);
   }
   else {

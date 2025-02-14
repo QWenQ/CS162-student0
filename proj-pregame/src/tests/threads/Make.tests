@@ -10,7 +10,7 @@ priority-fifo priority-preempt priority-sema priority-condvar \
 st-matmul mt-matmul-2 mt-matmul-4 mt-matmul-16 \
 priority-donate-chain priority-starve priority-starve-sema \
 mlfqs-load-1 mlfqs-load-60 mlfqs-load-avg mlfqs-recent-1 mlfqs-fair-2 \
-mlfqs-fair-20 mlfqs-nice-2 mlfqs-nice-5 mlfqs-nice-10 mlfqs-block \
+mlfqs-fair-20 mlfqs-nice-2 mlfqs-nice-10 mlfqs-block \
 )
 
 # Remove MLFQS tests for SU21

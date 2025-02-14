@@ -85,21 +85,22 @@ static void kill(struct intr_frame* f) {
 
       // If the process did not call exit but was terminated by the kernel (e.g. killed due to an exception), wait must return -1.
       struct thread *cur_thread = thread_current();
-      if (cur_thread->pcb != NULL) {
-         struct process *cur_process = cur_thread->pcb;
-         struct process *parent = cur_process->parent_;
-         if (parent) {
-            struct list_elem *e = NULL;
-            for (e = list_begin(&parent->child_exec_info_list_); e != list_end(&parent->child_exec_info_list_); e = list_next(e)) {
-               struct execution_info *exec_info = list_entry(e, struct execution_info, elem_);
-               if (exec_info->child_pid_ == cur_thread->tid) {
-                  exec_info->exit_status_ = -1;
-                  sema_up(&exec_info->ready_to_die_);
-                  break;
-               }
-            }
-         }
-      }
+      cur_thread->exit_status_ = -1;
+      // if (cur_thread->pcb != NULL) {
+      //    struct process *cur_process = cur_thread->pcb;
+      //    struct process *parent = cur_process->parent_;
+      //    if (parent) {
+      //       struct list_elem *e = NULL;
+      //       for (e = list_begin(&parent->child_exec_info_list_); e != list_end(&parent->child_exec_info_list_); e = list_next(e)) {
+      //          struct execution_info *exec_info = list_entry(e, struct execution_info, elem_);
+      //          if (exec_info->child_pid_ == cur_thread->tid) {
+      //             exec_info->exit_status_ = -1;
+      //             sema_up(&exec_info->ready_to_die_);
+      //             break;
+      //          }
+      //       }
+      //    }
+      // }
       process_exit();
       NOT_REACHED();
 
