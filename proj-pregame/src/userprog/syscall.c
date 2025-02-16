@@ -143,7 +143,11 @@ void sys_exec(struct intr_frame* f UNUSED) {
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_error(f, (uint8_t*)(args + 1), true);
   const char* cmd_line = (const char*)args[1];
-  f->eax = process_execute(cmd_line);
+  int cmd_length = strlen(cmd_line) + 1;
+  char* buffer = (char*)calloc(cmd_length, 1);
+  strlcpy(buffer, cmd_line, cmd_length);
+  f->eax = process_execute(buffer);
+  free(buffer);
 }
 
 void sys_wait(struct intr_frame* f UNUSED) {

@@ -36,19 +36,31 @@ struct pthread_meta {
 };
 
 
-/* execution information */
-struct execution_info {
-  pid_t child_pid_; /* child process id */
-  int exit_status_; /* exit status of process */
-
-  struct semaphore ready_to_die_; /* up when the child exits */
-
-  struct lock lock_; /* locked before visiting IS_DIED_ */
-  struct condition cond_; /* signal all if the process is dead */
-  bool is_died_; /* true if the child is dead */
-
-  struct list_elem elem_; /* element of list */
+/* process execution fields */
+struct process_meta {
+  pid_t pid_; // the pid of execution info of ower process
+  pid_t parent_pid_; // ower's parent's pid
+  struct lock lock_; // lock on process' state
+  struct condition cond_; // wait if IS_ALIVE_ is true
+  bool is_alive_; // true if the process is running
+  bool has_been_waited_; // true if the process has been waited
+  int exit_code_; // exit status of process
+  struct list_elem p_s_elem_; // use in PROCESS_STATE_LIST
 };
+
+
+/* execution information */
+// struct execution_info {
+//   pid_t child_pid_; /* child process id */
+//   int exit_status_; /* exit status of process */
+
+//   struct semaphore ready_to_die_; /* up when the child exits */
+//   struct lock lock_; /* locked before visiting IS_DIED_ */
+//   struct condition cond_; /* signal all if the process is dead */
+//   bool is_died_; /* true if the child is dead */
+
+//   struct list_elem elem_; /* element of list */
+// };
 
 /* The process control block for a given process. Since
    there can be multiple threads per process, we need a separate
@@ -62,12 +74,12 @@ struct process {
   struct thread* main_thread; /* Pointer to main thread */
 
   /* fields for child processes */
-  struct process* parent_; /* parent process */
-  bool is_child_created_success_; /* true if new child is loaded successfully */
-  struct semaphore exec_child_done_; /* up if loading work is done */
-  struct list children_; /* children process of current process */
-  struct list_elem elem_; /* element of children list */
-  struct list child_exec_info_list_; /* list of children execution information */
+  // struct process* parent_; /* parent process */
+  // bool is_child_created_success_; /* true if new child is loaded successfully */
+  // struct semaphore exec_child_done_; /* up if loading work is done */
+  // struct list children_; /* children process of current process */
+  // struct list_elem elem_; /* element of children list */
+  // struct list child_exec_info_list_; /* list of children execution information */
 
   /* deny write for the running executable */
   struct file *executable_; /* executable of current process */ 
@@ -78,7 +90,6 @@ struct process {
   struct file** open_files_; /* file hash array with MAX_FILES size */
   
   /* user threads fields */
-
   struct lock lock_on_cnt_; // lock when visit PTHREAD_UNADDED_CNT_;
   struct condition cond_on_cnt; // broadcast if PTHREAD_UNADDED_CNT_ is 0;
   int pthread_unadded_cnt_; // number of user threads created but not added to the PTHREADS_LIST_ yet 
