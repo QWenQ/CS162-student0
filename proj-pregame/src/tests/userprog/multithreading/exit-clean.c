@@ -11,7 +11,9 @@
 #include <pthread.h>
 
 #define NUM_THREADS 100
+// #define NUM_THREADS 1
 #define NUM_ACCESS 100
+// #define NUM_ACCESS 1
 
 // Global variables
 char* sample_file = "sample.txt";
@@ -50,8 +52,9 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < NUM_THREADS; i++)
       pthread_check_create(thread_function, NULL);
 
+
     // Waste some time accessing the file system
-    check_file(sample_file, sample, sizeof sample - 1);
+    // check_file(sample_file, sample, sizeof sample - 1);
 
     // Kill the process via exit call or exception
     bool exit_syscall = !strcmp(argv[2], "exit");

@@ -25,6 +25,9 @@
 static struct rw_lock lock_on_p_s_list; // lock on iterating PROCESS_STATE_LIST
 static struct list process_state_list; // list of all process' execution state
 
+// deallocate calling thread user stack
+static void deallocateUserStack(struct thread* t);
+
 // static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
@@ -106,7 +109,6 @@ pid_t process_execute(const char* file_name) {
 /* A thread function that loads a user process and starts it running. */
 static void start_process(void* file_name_) {
   // file_name containing all command-line args passed to the main()
-  // char* file_name = (char*)file_name_;
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
@@ -135,18 +137,17 @@ static void start_process(void* file_name_) {
 
     
     // Initializing the open file hash array in the new pcb
-    rw_lock_init(&(new_pcb->file_rw_lock_));
-    new_pcb->open_files_ = calloc(sizeof(struct file*), MAX_FILES);
+    // rw_lock_init(&(new_pcb->file_rw_lock_));
+    lock_init(&(new_pcb->lock_on_file_));
+    new_pcb->open_files_ = (struct file_info*)calloc(sizeof(struct file_info*), MAX_FILES);
 
     // initialize user thread fields
-    lock_init(&(new_pcb->lock_on_cnt_));
-    cond_init(&(new_pcb->cond_on_cnt));
-    new_pcb->pthread_unadded_cnt_ = 0;
     rw_lock_init(&(new_pcb->lock_on_pthreads_list_));
     list_init(&(new_pcb->pthreads_list_));
 
     struct pthread_meta* meta = (struct pthread_meta*)malloc(sizeof(struct pthread_meta));
     meta->thread_id_ = t->tid;
+    meta->thread_ = t;
     lock_init(&(meta->p_lock_));
     cond_init(&(meta->p_cond_));
     meta->p_is_died_ = false;
@@ -277,7 +278,7 @@ int process_wait(pid_t child_pid UNUSED) {
     rw_lock_release(&lock_on_p_s_list, false);
   }
 
-  // deallocate all element
+  // deallocate all element if current process is Pintos Main
   if (current_process->main_thread->tid == 1) {
     while (!list_empty(&process_state_list)) {
       e = list_front(&process_state_list);
@@ -304,6 +305,45 @@ void process_exit(void) {
   }
 
   struct process *pcb = cur->pcb;
+
+  printf("%s: exit(%d)\n", pcb->process_name, cur->exit_status_);
+
+  // // for user threads in the same process, all of them execept current one should be terminated immediately
+  // {
+  //   struct list_elem* e = NULL;
+  //   enum intr_level old_level = intr_disable();
+  //   for (e = list_begin(&(pcb->pthreads_list_)); e != list_end(&(pcb->pthreads_list_)); e = list_next(e)) {
+  //     struct pthread_meta* meta = list_entry(e, struct pthread_meta, p_elem_);
+  //     if ((meta->thread_ != NULL) && (meta->thread_ != cur)) {
+  //       list_remove(&(meta->thread_->elem));
+  //       list_remove(&(meta->thread_->allelem));
+  //       // deallocate user thread's user stack
+  //       deallocateUserStack(meta->thread_);
+  //       // deallocate user thread's kernel stack
+  //       palloc_free_page(meta->thread_);
+  //       meta->thread_ = NULL;
+  //     }
+  //   }
+
+  //   // close open files and free open file array
+  //   for (size_t i = 2; i < MAX_FILES; ++i) {
+  //     if (pcb->open_files_[i]) {
+  //       struct file_info* info = pcb->open_files_[i];    
+  //       file_close(info->file_);
+  //       info->file_ = NULL;
+  //       free(info->file_name_);
+  //       info->file_name_ = NULL;
+  //       free(info);
+  //       pcb->open_files_[i] = NULL;
+  //     }
+  //   }
+  //   free(pcb->open_files_);
+  //   pcb->open_files_ = NULL;
+    
+  //   intr_set_level(old_level);
+  // }
+
+  // update current process into in the kernel
   struct list_elem* e = NULL;
   struct process_meta* process_info = NULL;
   rw_lock_acquire(&lock_on_p_s_list, true);
@@ -354,11 +394,22 @@ void process_exit(void) {
   }
 
   // close open files and free open file array
+  lock_acquire(&(pcb_to_free->lock_on_file_));
   for (size_t i = 2; i < MAX_FILES; ++i) {
     if (pcb_to_free->open_files_[i]) {
-      file_close(pcb_to_free->open_files_[i]);
+      struct file_info* info = pcb_to_free->open_files_[i];    
+      file_close(info->file_);
+      info->file_ = NULL;
+      free(info->file_name_);
+      info->file_name_ = NULL;
+      free(info);
+      pcb_to_free->open_files_[i] = NULL;
     }
   }
+  free(pcb_to_free->open_files_);
+  pcb_to_free->open_files_ = NULL;
+  lock_release(&(pcb_to_free->lock_on_file_));
+
 
   // free user locks and semaphores
   for (int i = 0; i < USER_LOCK_SIZE; ++i) {
@@ -368,7 +419,6 @@ void process_exit(void) {
 
   palloc_free_page((void*)pcb_to_free->locks_);
 
-  free(pcb_to_free->open_files_);
   free(pcb_to_free);
 
 
@@ -896,22 +946,26 @@ tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSE
   if (is_process_dying) return TID_ERROR;
   
 
-  int bytes = sizeof(stub_fun) + sizeof(pthread_fun) + sizeof(void*) + sizeof(struct process*);
-  uint64_t* sp_args = (uint64_t*)palloc_get_page(PAL_ZERO | PAL_USER);
+  // uint64_t* sp_args = (uint64_t*)palloc_get_page(PAL_ZERO | PAL_USER);
+  uint64_t* sp_args = (uint64_t*)malloc(sizeof(uint64_t) * 6);
   if (sp_args == NULL) return TID_ERROR;
+  struct semaphore sema;
+  sema_init(&sema, 0);
   sp_args[0] = sf;
   sp_args[1] = tf;
   sp_args[2] = arg;
   sp_args[3] = pcb;
-  lock_acquire(&(pcb->lock_on_cnt_));
-  ++pcb->pthread_unadded_cnt_;
-  lock_release(&(pcb->lock_on_cnt_));
+  sp_args[4] = &sema;
+  // pthread initialization status: 1 for success, 0 for fail
+  sp_args[5] = 0;
+
   tid_t tid = thread_create("", PRI_DEFAULT, start_pthread, (void*)sp_args);
-  if (tid == TID_ERROR) {
-    lock_acquire(&(pcb->lock_on_cnt_));
-    --pcb->pthread_unadded_cnt_;
-    lock_release(&(pcb->lock_on_cnt_));
+  sema_down(&sema);
+  if (sp_args[5] == 0) {
+    tid = TID_ERROR;
   }
+  free(sp_args);
+
   return tid;
 }
 
@@ -926,6 +980,8 @@ static void start_pthread(void* exec_ UNUSED) {
   struct process* pcb = (struct process*)(*((uint64_t*)exec_ + 3));
   struct thread* cur_thread = thread_current();
   cur_thread->pcb = pcb;
+  struct semaphore* sema = (struct semaphore*)(*((uint64_t*)exec_ + 4));
+  uint64_t* exec_status = ((uint64_t*)exec_ + 5);
 
   // activate page directory
   process_activate();
@@ -937,9 +993,12 @@ static void start_pthread(void* exec_ UNUSED) {
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   bool success = setup_thread(&(if_.eip), &(if_.esp), exec_);
-  palloc_free_page(exec_);
+  // palloc_free_page(exec_);
 
   if (!success) {
+    // before exit, wake up current pthread's creator
+    sema_up(sema);
+
     pthread_exit();
     NOT_REACHED();
   }
@@ -948,10 +1007,14 @@ static void start_pthread(void* exec_ UNUSED) {
   // create a meta info of new thread
   struct pthread_meta* new_meta = (struct pthread_meta*)malloc(sizeof(struct pthread_meta));
   if (new_meta == NULL) {
+    // before exit, wake up current pthread's creator
+    sema_up(sema);
+
     pthread_exit();
     NOT_REACHED();
   }
   new_meta->thread_id_ = cur_thread->tid;
+  new_meta->thread_ = cur_thread;
   lock_init(&(new_meta->p_lock_));
   cond_init(&(new_meta->p_cond_));
   new_meta->p_is_died_ = false;
@@ -961,14 +1024,12 @@ static void start_pthread(void* exec_ UNUSED) {
   // add itself to the list of threads in the PCB
   list_push_front(&(pcb->pthreads_list_), &(new_meta->p_elem_));
 
-  lock_acquire(&(pcb->lock_on_cnt_));
-  --pcb->pthread_unadded_cnt_;
-  if (pcb->pthread_unadded_cnt_ <= 0) {
-    cond_broadcast(&(pcb->cond_on_cnt), &(pcb->lock_on_cnt_));
-  }
-  lock_release(&(pcb->lock_on_cnt_));
-
   rw_lock_release(&(pcb->lock_on_pthreads_list_), false);
+
+  // pthread execution successes
+  *exec_status = 1;
+  // before its real job, wake up current pthread's creator
+  sema_up(sema);
 
 
   /* Start the user process by simulating a return from an
@@ -996,11 +1057,11 @@ tid_t pthread_join(tid_t tid UNUSED) {
   struct process* pcb = cur_thread->pcb;
   if (pcb == NULL) return TID_ERROR;
 
-  lock_acquire(&(pcb->lock_on_cnt_));
-  while (pcb->pthread_unadded_cnt_ > 0) {
-    cond_wait(&(pcb->cond_on_cnt), &(pcb->lock_on_cnt_));
-  }
-  lock_release(&(pcb->lock_on_cnt_));
+  // lock_acquire(&(pcb->lock_on_cnt_));
+  // while (pcb->pthread_unadded_cnt_ > 0) {
+  //   cond_wait(&(pcb->cond_on_cnt), &(pcb->lock_on_cnt_));
+  // }
+  // lock_release(&(pcb->lock_on_cnt_));
 
   // valid join: thread was spawned in the same process and has not been waited on yet.
   struct list_elem* e = NULL;
@@ -1033,21 +1094,26 @@ tid_t pthread_join(tid_t tid UNUSED) {
 }
 
 
+// deallocate calling thread user stack
+static void deallocateUserStack(struct thread* t) {
+  struct process* pcb = t->pcb;
+  if (pcb == NULL) return;
+
+
+  void* kpage = pagedir_get_page(pcb->pagedir, t->p_user_stack_addr_);
+  pagedir_clear_page(pcb->pagedir, t->p_user_stack_addr_);
+  if (kpage != NULL) {
+    palloc_free_page(kpage);
+  }
+  t->p_user_stack_addr_ = NULL;
+
+}
+
 // update current state to die state and wake up all user threads joined on it 
 static void wakeUpAllWaitedThreads(void) {
   struct thread* cur_thread = thread_current();
   struct process* pcb = cur_thread->pcb;
 
-
-  // deallocate its user stack
-  void* kpage = pagedir_get_page(pcb->pagedir, cur_thread->p_user_stack_addr_);
-  pagedir_clear_page(pcb->pagedir, cur_thread->p_user_stack_addr_);
-  if (kpage != NULL) {
-    palloc_free_page(kpage);
-  }
-  cur_thread->p_user_stack_addr_ = NULL;
-
-  
   struct list_elem* e = NULL;
   struct pthread_meta* meta = NULL;
   rw_lock_acquire(&(pcb->lock_on_pthreads_list_), true);
@@ -1067,6 +1133,8 @@ static void wakeUpAllWaitedThreads(void) {
   lock_acquire(&(meta->p_lock_));
   // update current thread's state to die
   meta->p_is_died_ = true;
+  meta->thread_ = NULL;
+  meta->exit_code_ = cur_thread->exit_status_;
   // wake up all waited threads
   cond_broadcast(&(meta->p_cond_), &(meta->p_lock_));
   lock_release(&(meta->p_lock_)); 
@@ -1083,9 +1151,19 @@ static void wakeUpAllWaitedThreads(void) {
    now, it does nothing. */
 void pthread_exit(void) {
   wakeUpAllWaitedThreads();
-  
-  thread_exit();
-  NOT_REACHED();
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  if (pcb == NULL || (pcb->main_thread != cur_thread)) {
+    // non-main thread exits
+    deallocateUserStack(cur_thread);
+    thread_exit();
+    NOT_REACHED();
+  }
+  else {
+    // main thread exits
+    pthread_exit_main();
+    NOT_REACHED();
+  }
 }
 
 /* Only to be used when the main thread explicitly calls pthread_exit.
@@ -1098,7 +1176,7 @@ void pthread_exit(void) {
    now, it does nothing. */
 void pthread_exit_main(void) {
 
-  wakeUpAllWaitedThreads();
+  // wakeUpAllWaitedThreads();
 
   // The main thread should wait on all threads in the process to terminate properly, before exiting itself.
   struct thread* main_thread = thread_current();
@@ -1113,14 +1191,23 @@ void pthread_exit_main(void) {
 
   // free all user threads' kernel stack except the main's kernel stack
   // note: at this point, all user threads but the main have been died, so no concurrency will happen
+  int real_exit_code = main_thread->exit_status_;
   rw_lock_acquire(&(pcb->lock_on_pthreads_list_), false);
   while (!list_empty(&(pcb->pthreads_list_))) {
     e = list_begin(&(pcb->pthreads_list_));
     list_remove(e);
     struct pthread_meta* meta = list_entry(e, struct pthread_meta, p_elem_);
+    if (meta->exit_code_ == -1) {
+      real_exit_code = -1;
+    }
+    else if ((real_exit_code != -1) && (meta->exit_code_ > 0)) {
+      real_exit_code = meta->exit_code_;
+    }
     free(meta);
   }
   rw_lock_release(&(pcb->lock_on_pthreads_list_), false);
+  main_thread->exit_status_ = real_exit_code;
+  deallocateUserStack(main_thread);
 
   process_exit();
 }

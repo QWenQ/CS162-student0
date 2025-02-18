@@ -116,10 +116,11 @@ void sys_exit(struct intr_frame* f UNUSED) {
   }
 
   struct thread *cur_thread = thread_current();
-  cur_thread->exit_status_ = args[1];
+  cur_thread->exit_status_ = (int)f->eax;
 
-  printf("%s: exit(%d)\n", thread_current()->pcb->process_name, f->eax);
-  process_exit();
+  pthread_exit();
+
+  // process_exit();
 }
 
 void sys_practice(struct intr_frame* f UNUSED) {
@@ -197,29 +198,54 @@ void sys_open(struct intr_frame* f UNUSED) {
     syscall_handler(f);
   }
 
-  const char* file = (const char*)args[1];
-  struct file* open_file = filesys_open(file);
+  const char* file_name = (const char*)args[1];
+  struct thread* running_thread = thread_current();
+  struct process* pcb = running_thread->pcb;
+
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file* open_file = filesys_open(file_name);
   if (open_file == NULL) {
+    lock_release(&(pcb->lock_on_file_));
     f->eax = -1;
     return;
   }
 
+  // create and initilaize a new file_info node
+  struct file_info* new_info = (struct file_info*)calloc(sizeof(struct file_info), 1);
+  if (new_info == NULL) {
+    lock_release(&(pcb->lock_on_file_));
+    f->eax = -1;
+    return;
+  }
+  int file_name_len = strlen(file_name);
+  new_info->file_name_ = (char*)malloc(file_name_len + 1);
+  if (new_info->file_name_ == NULL) {
+    lock_release(&(pcb->lock_on_file_));
+    free(new_info);
+    f->eax = -1;
+    return;
+  }
 
-  struct thread* running_thread = thread_current();
-  struct process* pcb = running_thread->pcb;
+  strlcpy(new_info->file_name_, file_name, file_name_len + 1);
+  new_info->file_ = open_file;
 
   f->eax = -1;
-  // ciritical section
-  rw_lock_acquire(&(pcb->file_rw_lock_), false);
+  // rw_lock_acquire(&(pcb->file_rw_lock_), false);
   for (int i = 2; i < MAX_FILES; ++i) {
     if (pcb->open_files_[i] == NULL) {
-      pcb->open_files_[i] = open_file;
+      pcb->open_files_[i] = new_info;
       f->eax = i;
       break;
     }
   }
+  // rw_lock_release(&(pcb->file_rw_lock_), false);
+  lock_release(&(pcb->lock_on_file_));
 
-  rw_lock_release(&(pcb->file_rw_lock_), false);
+  if ((int)f->eax == -1) {
+    free(new_info->file_name_);
+    file_close(new_info->file_);
+    free(new_info);
+  }
 }
 
 void sys_filesize(struct intr_frame* f UNUSED) {
@@ -236,12 +262,14 @@ void sys_filesize(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  rw_lock_acquire(&(pcb->file_rw_lock_), true);
-  struct file* p_file = pcb->open_files_[fd];
-  if (p_file != NULL) {
-    f->eax = file_length(p_file);
+  // rw_lock_acquire(&(pcb->file_rw_lock_), true);
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file_info* info = pcb->open_files_[fd];
+  if (info != NULL) {
+    f->eax = file_length(info->file_);
   }
-  rw_lock_release(&(pcb->file_rw_lock_), true);
+  // rw_lock_release(&(pcb->file_rw_lock_), true);
+  lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_read(struct intr_frame* f UNUSED) {
@@ -282,10 +310,12 @@ void sys_read(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  rw_lock_acquire(&(pcb->file_rw_lock_), true);
-  struct file* p_file = pcb->open_files_[fd];
-  f->eax = file_read(p_file, buffer, size);
-  rw_lock_release(&(pcb->file_rw_lock_), true);
+  // rw_lock_acquire(&(pcb->file_rw_lock_), true);
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file_info* info = pcb->open_files_[fd];
+  f->eax = file_read(info->file_, buffer, size);
+  // rw_lock_release(&(pcb->file_rw_lock_), true);
+  lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_write(struct intr_frame* f UNUSED) {
@@ -315,10 +345,12 @@ void sys_write(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  rw_lock_acquire(&(pcb->file_rw_lock_), true);
-  struct file* p_file = pcb->open_files_[fd];
-  f->eax = file_write(p_file, buffer, size);
-  rw_lock_release(&(pcb->file_rw_lock_), true);
+  // rw_lock_acquire(&(pcb->file_rw_lock_), true);
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file_info* info = pcb->open_files_[fd];
+  f->eax = file_write(info->file_, buffer, size);
+  // rw_lock_release(&(pcb->file_rw_lock_), true);
+  lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_seek(struct intr_frame* f UNUSED) {
@@ -337,10 +369,12 @@ void sys_seek(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  rw_lock_acquire(&pcb->file_rw_lock_, true);
-  struct file* p_file = pcb->open_files_[fd];
-  file_seek(p_file, position);
-  rw_lock_release(&pcb->file_rw_lock_, true);
+  // rw_lock_acquire(&pcb->file_rw_lock_, true);
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file_info* info = pcb->open_files_[fd];
+  file_seek(info->file_, position);
+  // rw_lock_release(&pcb->file_rw_lock_, true);
+  lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_tell(struct intr_frame* f UNUSED) {
@@ -357,10 +391,12 @@ void sys_tell(struct intr_frame* f UNUSED) {
   struct process* pcb = running_thread->pcb;
 
 
-  rw_lock_acquire(&pcb->file_rw_lock_, true);
-  struct file* p_file = pcb->open_files_[fd];
-  f->eax = file_tell(p_file);
-  rw_lock_release(&pcb->file_rw_lock_, true);
+  // rw_lock_acquire(&pcb->file_rw_lock_, true);
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file_info* info = pcb->open_files_[fd];
+  f->eax = file_tell(info);
+  // rw_lock_release(&pcb->file_rw_lock_, true);
+  lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_close(struct intr_frame* f UNUSED) {
@@ -375,11 +411,16 @@ void sys_close(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  rw_lock_acquire(&pcb->file_rw_lock_, false);
-  struct file* p_file = pcb->open_files_[fd];
-  file_close(p_file);
+  // rw_lock_acquire(&pcb->file_rw_lock_, false);
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file_info* info = pcb->open_files_[fd];
+  file_close(info->file_);
+  info->file_ = NULL;
+  free(info->file_name_);
+  info->file_name_ = NULL;
   pcb->open_files_[fd] = NULL;
-  rw_lock_release(&pcb->file_rw_lock_, false);
+  // rw_lock_release(&pcb->file_rw_lock_, false);
+  lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_compute_e(struct intr_frame* f UNUSED) {
@@ -424,18 +465,9 @@ void sys_pt_create(struct intr_frame* f UNUSED) {
 
 void sys_pt_exit(struct intr_frame* f UNUSED) {
   // signature: void sys_pthread_exit(void) NO_RETURN;
-  uint32_t* args = ((uint32_t*)f->esp);
-  struct thread* cur_thread = thread_current();
-  struct process* pcb = cur_thread->pcb;
-  if (pcb == NULL) return;
-  if (pcb->main_thread == cur_thread) {
-    // main thread exits
-    pthread_exit_main();
-  }
-  else {
-    // non-main thread exits
-    pthread_exit();
-  }
+  uint32_t* args UNUSED= ((uint32_t*)f->esp);
+  pthread_exit();
+  NOT_REACHED();
 }
 
 void sys_pt_join(struct intr_frame* f UNUSED) {
