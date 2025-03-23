@@ -4,4 +4,4 @@ use warnings;
 use tests::tests;
 use tests::threads::mlfqs;
 
-check_mlfqs_fair ([0...9], 35);
+check_mlfqs_fair ([0...9], 30);

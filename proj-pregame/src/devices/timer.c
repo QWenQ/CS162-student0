@@ -8,6 +8,7 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "lib/string.h"
+#include "threads/malloc.h"
 
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -25,8 +26,17 @@ static int64_t ticks;
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
 
+/* info of sleep thread */
+struct sleep_thread_info {
+  int64_t ticks_; // tick point at least the sleeping thread should be woken up
+  struct semaphore sema_; // up when the sleeping thread should be woken up
+  struct list_elem l_elem_; // managed by SLEEP_THREADS_LIST
+};
+
+
+struct lock lock_on_sleep; // lock when accessing SLEEP_THREADS;
 /*list containning sleeping threads ordered by their wake up point increasingly */
-static struct list sleep_threads = LIST_INITIALIZER(sleep_threads);
+static struct list sleep_threads_list;
 
 /* wake up sleeping threads if necessary */
 static void wake_up_sleeping_threads(void);
@@ -42,6 +52,8 @@ static void real_time_delay(int64_t num, int32_t denom);
 void timer_init(void) {
   pit_configure_channel(0, 2, TIMER_FREQ);
   intr_register_ext(0x20, timer_interrupt, "8254 Timer");
+  lock_init(&lock_on_sleep);
+  list_init(&sleep_threads_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -85,30 +97,27 @@ int64_t timer_elapsed(int64_t then) { return timer_ticks() - then; }
 void timer_sleep(int64_t ticks) {
   if (ticks < 1) return;
 
-  int64_t start = timer_ticks();
+  int64_t now_ticks = timer_ticks();
 
-  struct thread* cur_thread = thread_current();
-  cur_thread->wake_up_ticks_ = start + ticks;
+  struct sleep_thread_info* info = (struct sleep_thread_info*)malloc(sizeof(struct sleep_thread_info));
+  if (info == NULL) return;
+  info->ticks_ = now_ticks + ticks;
+  sema_init(&info->sema_, 0);
 
   // push current thread into sleeping queue in increasing order of wake up ticks
-  enum intr_level old_level = intr_disable();
-  ASSERT(intr_get_level() == INTR_OFF);
-
+  lock_acquire(&lock_on_sleep);
   struct list_elem* e = NULL;
-  for (e = list_begin(&sleep_threads); e != list_end(&sleep_threads); e = list_next(e)) {
-    struct thread* thread_in_sleeping = list_entry(e, struct thread, elem);
-    if (thread_in_sleeping->wake_up_ticks_ >= cur_thread->wake_up_ticks_) {
+  for (e = list_begin(&sleep_threads_list); e != list_end(&sleep_threads_list); e = list_next(e)) {
+    struct sleep_thread_info* cur = list_entry(e, struct sleep_thread_info, l_elem_);
+    if (info->ticks_ <= cur->ticks_) {
       break;
     }
   }
-  list_insert(e, &cur_thread->elem);
-
-  thread_block();
-  intr_set_level(old_level);
-
-  // ASSERT(intr_get_level() == INTR_ON);
-  // while (timer_elapsed(start) < ticks)
-  //   thread_yield();
+  list_insert(e, &info->l_elem_);
+  lock_release(&lock_on_sleep);
+  // sleep until woken up
+  sema_down(&info->sema_);
+  free(info);
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -155,17 +164,23 @@ void timer_print_stats(void) { printf("Timer: %" PRId64 " ticks\n", timer_ticks(
 
 /* wake up sleeping threads if necessary */
 static void wake_up_sleeping_threads(void) {
-
-  while (!list_empty(&sleep_threads)) {
-    struct list_elem* e = list_front(&sleep_threads);
-    struct thread* thread_woken_up = list_entry(e, struct thread, elem);
-    if (thread_woken_up->wake_up_ticks_ > ticks) {
+  // try to access SLEEP_THREADS_LIST exclusively
+  // failure access indicates the list is being modified by threads including current thread, 
+  // waking up sleep threads should be cancelled
+  if (lock_held_by_current_thread(&lock_on_sleep)) return;
+  bool success = lock_try_acquire(&lock_on_sleep);
+  if (!success) return;
+  while (!list_empty(&sleep_threads_list)) {
+    struct list_elem* e = list_front(&sleep_threads_list);
+    struct sleep_thread_info* info = list_entry(e, struct sleep_thread_info, l_elem_);
+    if (info->ticks_ > ticks) {
       break;
     }
-    list_pop_front(&sleep_threads);
-
-    thread_unblock(thread_woken_up); 
+    list_pop_front(&sleep_threads_list);
+    // wake up expired sleep threads
+    sema_up(&info->sema_);
   }
+  lock_release(&lock_on_sleep);
 }
 
 /* Timer interrupt handler. */
