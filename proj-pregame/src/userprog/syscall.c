@@ -5,9 +5,8 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "userprog/process.h"
-// #include "user/syscall.h"
 
-#define PHYS_BASE 0xc0000000 /* 3 GB. */
+// #define PHYS_BASE 0xc0000000 /* 3 GB. */
 
 #define SIZE_OF_FPU 108 /* length of FPU is 108 bytes */
 
@@ -18,6 +17,10 @@ static bool put_user(uint8_t *udst, uint8_t byte);
 static int is_legal_pointer(uint8_t* uaddr, bool read);
 
 static int is_legal_fd(int fd);
+
+static void exit_if_user_address_space_overflow(uint32_t* sp, int args_num);
+
+static void string_check(const char* str);
 
 static void syscall_handler(struct intr_frame*);
 
@@ -105,45 +108,77 @@ static int is_legal_fd(int fd) {
 }
 
 
+// check if there is any argument be above the top of user address space
+static void exit_if_user_address_space_overflow(uint32_t* sp, int args_num) {
+  bool overflow = (sp + sizeof(uint32_t) * args_num) > PHYS_BASE;
+  if (overflow) {
+    struct thread *cur_thread = thread_current();
+    cur_thread->exit_status_ = -1;
+
+    pthread_exit();
+    NOT_REACHED();
+  }
+
+  // all stack position containning arguments should be valid 
+  for (int i = 0; i < sizeof(uint32_t) * args_num; ++i) {
+    if (is_legal_pointer((uint8_t*)sp + i, true) == -1) {
+      struct thread *cur_thread = thread_current();
+      cur_thread->exit_status_ = -1;
+
+      pthread_exit();
+      NOT_REACHED();
+    }
+  }
+}
+
+// check if string STR is readable on all bytes
+static void string_check(const char* str) {
+  char* ptr = str;
+  while (true) {
+    if (is_legal_pointer(ptr, true) == -1) {
+      struct thread *cur_thread = thread_current();
+      cur_thread->exit_status_ = -1;
+
+      pthread_exit();
+      NOT_REACHED();
+    }
+    if (*ptr == '\0') break;
+    ++ptr;
+  } 
+}
+
 /* syscall behaviours */
 /********************************************************************************/
 void sys_exit(struct intr_frame* f UNUSED) {
   // signature: void exit(int status)
   uint32_t* args = ((uint32_t*)f->esp);
-  f->eax = is_legal_pointer((uint8_t*)(args + 1), true);
-  if ((int)f->eax != -1) {
-    f->eax = args[1];
-  }
+  exit_if_user_address_space_overflow(args, 2);
 
   struct thread *cur_thread = thread_current();
-  cur_thread->exit_status_ = (int)f->eax;
+  cur_thread->exit_status_ = args[1];
 
   pthread_exit();
-
-  // process_exit();
+  NOT_REACHED();
 }
 
 void sys_practice(struct intr_frame* f UNUSED) {
   // signature: int practice (int i)
   uint32_t* args = ((uint32_t*)f->esp);
-  f->eax = is_legal_pointer((uint8_t*)(args + 1), true);
-  if ((int)f->eax == -1) {
-    return;
-  }
+  exit_if_user_address_space_overflow(args, 2);
   f->eax = args[1] + 1;
 }
 
 void sys_halt(struct intr_frame* f UNUSED) {
   // signature: void halt (void)
-  // uint32_t* args = ((uint32_t*)f->esp);
   shutdown_power_off();
 }
 
 void sys_exec(struct intr_frame* f UNUSED) {
   // signature: pid_t exec (const char *cmd_line)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 2);
   const char* cmd_line = (const char*)args[1];
+  string_check(cmd_line);
   int cmd_length = strlen(cmd_line) + 1;
   char* buffer = (char*)calloc(cmd_length, 1);
   strlcpy(buffer, cmd_line, cmd_length);
@@ -154,7 +189,7 @@ void sys_exec(struct intr_frame* f UNUSED) {
 void sys_wait(struct intr_frame* f UNUSED) {
   // signature: int wait (pid_t pid)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 2);
   pid_t child_pid = (pid_t)args[1];
   f->eax = process_wait(child_pid);
 }
@@ -162,23 +197,27 @@ void sys_wait(struct intr_frame* f UNUSED) {
 void sys_create(struct intr_frame* f UNUSED) {
   // signature: bool create (const char *file, unsigned initial_size)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true); 
+  exit_if_user_address_space_overflow(args, 3);
   const char* file = (const char*)args[1];
-  exit_if_error(f, (uint8_t*)file, true);
-  exit_if_error(f, (uint8_t*)(args + 2), true);
+  string_check(file);
   unsigned initial_size = (unsigned)args[2];
 
+  lock_on_file_system();
   bool success = filesys_create(file, initial_size);
+  unlock_on_file_system();
   f->eax = success ? 1 : 0;
 }
 
 void sys_remove(struct intr_frame* f UNUSED) {
   // signature: bool remove (const char *file)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 2);
   const char* file_name = (const char*)args[1];
+  string_check(file_name);
   
+  lock_on_file_system();
   bool success = filesys_remove(file_name);
+  unlock_on_file_system();
 
   f->eax = success ? 1 : 0;
 }
@@ -186,25 +225,24 @@ void sys_remove(struct intr_frame* f UNUSED) {
 void sys_open(struct intr_frame* f UNUSED) {
   // signature: int open(const char* file)
   uint32_t* args = ((uint32_t*)f->esp);
-  f->eax = is_legal_pointer((uint8_t*)(args + 1), true);
-  if ((int)f->eax == -1) {
-    return;
-  }
-
-  f->eax = is_legal_pointer((uint8_t*)args[1], true);
-  if ((int)f->eax == -1) {
-    args[0] = SYS_EXIT;
-    args[1] = -1;
-    syscall_handler(f);
-  }
+  exit_if_user_address_space_overflow(args, 2);
 
   const char* file_name = (const char*)args[1];
+  string_check(file_name);
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
   lock_acquire(&(pcb->lock_on_file_));
+  // debug info
+  // printf("open() -> ");
+
+  lock_on_file_system();
   struct file* open_file = filesys_open(file_name);
+  unlock_on_file_system();
   if (open_file == NULL) {
+    // debug info
+    // printf("filesys_open(%s) failed.\n", file_name);
+
     lock_release(&(pcb->lock_on_file_));
     f->eax = -1;
     return;
@@ -213,6 +251,9 @@ void sys_open(struct intr_frame* f UNUSED) {
   // create and initilaize a new file_info node
   struct file_info* new_info = (struct file_info*)calloc(sizeof(struct file_info), 1);
   if (new_info == NULL) {
+    // debug info
+    // printf("calloc() for struct file_info failed.\n");
+
     lock_release(&(pcb->lock_on_file_));
     f->eax = -1;
     return;
@@ -220,6 +261,9 @@ void sys_open(struct intr_frame* f UNUSED) {
   int file_name_len = strlen(file_name);
   new_info->file_name_ = (char*)malloc(file_name_len + 1);
   if (new_info->file_name_ == NULL) {
+    // debug info
+    // printf("malloc() for file name string failed.\n");
+
     lock_release(&(pcb->lock_on_file_));
     free(new_info);
     f->eax = -1;
@@ -243,7 +287,9 @@ void sys_open(struct intr_frame* f UNUSED) {
 
   if ((int)f->eax == -1) {
     free(new_info->file_name_);
+    lock_on_file_system();
     file_close(new_info->file_);
+    unlock_on_file_system();
     free(new_info);
   }
 }
@@ -251,7 +297,7 @@ void sys_open(struct intr_frame* f UNUSED) {
 void sys_filesize(struct intr_frame* f UNUSED) {
   // signature: int filesize (int fd)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 2);
   int fd = args[1];
 
   f->eax = is_legal_fd(fd);
@@ -262,27 +308,32 @@ void sys_filesize(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  // rw_lock_acquire(&(pcb->file_rw_lock_), true);
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
   if (info != NULL) {
+    lock_on_file_system();
     f->eax = file_length(info->file_);
+    unlock_on_file_system();
   }
-  // rw_lock_release(&(pcb->file_rw_lock_), true);
   lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_read(struct intr_frame* f UNUSED) {
   // signature: int read (int fd, void *buffer, unsigned size)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 4);
   int fd = args[1];
-  exit_if_error(f, (uint8_t*)(args + 2), true);
   char* buffer = args[2];
-  exit_if_error(f, (uint8_t*)(args + 3), true);
   unsigned size = args[3];
-  exit_if_error(f, (uint8_t*)(buffer), true);
-  exit_if_error(f, (uint8_t*)(buffer + size - 1), true);
+  for (int i = 0; i < size; ++i) {
+    exit_if_error(f, buffer + i, false);
+  }
+
+#ifdef VM
+  struct thread* cur_thread = thread_current();
+  struct process* cur_pcb = cur_thread->pcb;
+  pin_page(cur_pcb, buffer);
+#endif
 
   // read from keyboard
   if (fd == STDIN_FILENO) {
@@ -313,22 +364,34 @@ void sys_read(struct intr_frame* f UNUSED) {
   // rw_lock_acquire(&(pcb->file_rw_lock_), true);
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
+  lock_on_file_system();
   f->eax = file_read(info->file_, buffer, size);
+  unlock_on_file_system();
   // rw_lock_release(&(pcb->file_rw_lock_), true);
   lock_release(&(pcb->lock_on_file_));
+  
+#ifdef VM
+  unpin_page(cur_pcb, buffer);
+#endif
+
 }
 
 void sys_write(struct intr_frame* f UNUSED) {
   // signature: int write (int fd, const void *buffer, unsigned size)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 4);
   int fd = args[1];
-  exit_if_error(f, (uint8_t*)(args + 2), true);
   char* buffer = args[2];
-  exit_if_error(f, (uint8_t*)(args + 3), true);
   unsigned size = args[3];
-  exit_if_error(f, (uint8_t*)(buffer), true);
-  exit_if_error(f, (uint8_t*)(buffer + size - 1), true);
+  for (int i = 0; i < size; ++i) {
+    exit_if_error(f, buffer + i, true);
+  }
+
+#ifdef VM
+  struct thread* cur_thread = thread_current();
+  struct process* cur_pcb = cur_thread->pcb;
+  pin_page(cur_pcb, buffer);
+#endif
 
 
   if (fd == STDOUT_FILENO) {
@@ -345,20 +408,24 @@ void sys_write(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  // rw_lock_acquire(&(pcb->file_rw_lock_), true);
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
+  lock_on_file_system();
   f->eax = file_write(info->file_, buffer, size);
-  // rw_lock_release(&(pcb->file_rw_lock_), true);
+  unlock_on_file_system();
   lock_release(&(pcb->lock_on_file_));
+
+#ifdef VM
+  unpin_page(cur_pcb, buffer);
+#endif
+
 }
 
 void sys_seek(struct intr_frame* f UNUSED) {
   // signature: void seek (int fd, unsigned position)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 3);
   int fd = args[1];
-  exit_if_error(f, (uint8_t*)(args + 2), true);
   unsigned position = args[2];
 
   f->eax = is_legal_fd(fd);
@@ -369,18 +436,18 @@ void sys_seek(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  // rw_lock_acquire(&pcb->file_rw_lock_, true);
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
+  lock_on_file_system();
   file_seek(info->file_, position);
-  // rw_lock_release(&pcb->file_rw_lock_, true);
+  unlock_on_file_system();
   lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_tell(struct intr_frame* f UNUSED) {
   // signature: int tell(int fd)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 2);
   int fd = args[1];
   f->eax = is_legal_fd(fd);
   if ((int)f->eax == -1) {
@@ -391,18 +458,18 @@ void sys_tell(struct intr_frame* f UNUSED) {
   struct process* pcb = running_thread->pcb;
 
 
-  // rw_lock_acquire(&pcb->file_rw_lock_, true);
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
+  lock_on_file_system();
   f->eax = file_tell(info);
-  // rw_lock_release(&pcb->file_rw_lock_, true);
+  unlock_on_file_system();
   lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_close(struct intr_frame* f UNUSED) {
   // signature: void close (int fd)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
+  exit_if_user_address_space_overflow(args, 2);
   int fd = args[1];
   f->eax = is_legal_fd(fd);
   if ((int)f->eax == -1) {
@@ -411,23 +478,25 @@ void sys_close(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
-  // rw_lock_acquire(&pcb->file_rw_lock_, false);
   lock_acquire(&(pcb->lock_on_file_));
+  // debug info
+  // printf("close() -> ");
+
   struct file_info* info = pcb->open_files_[fd];
+  lock_on_file_system();
   file_close(info->file_);
+  unlock_on_file_system();
   info->file_ = NULL;
   free(info->file_name_);
   info->file_name_ = NULL;
   pcb->open_files_[fd] = NULL;
-  // rw_lock_release(&pcb->file_rw_lock_, false);
   lock_release(&(pcb->lock_on_file_));
 }
 
 void sys_compute_e(struct intr_frame* f UNUSED) {
   // signature: double compute_e (int n)
   uint32_t* args = ((uint32_t*)f->esp);
-  exit_if_error(f, (uint8_t*)(args + 1), true);
-
+  exit_if_user_address_space_overflow(args, 2);
   int n = (int)args[1];
 
   // store state of fpu
@@ -453,6 +522,7 @@ void sys_compute_e(struct intr_frame* f UNUSED) {
 void sys_pt_create(struct intr_frame* f UNUSED) {
   // signature: tid_t sys_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 4);
   exit_if_error(f, (uint8_t*)(args + 1), true);
   exit_if_error(f, (uint8_t*)(args + 2), true);
   exit_if_error(f, (uint8_t*)(args + 3), true);
@@ -466,6 +536,7 @@ void sys_pt_create(struct intr_frame* f UNUSED) {
 void sys_pt_exit(struct intr_frame* f UNUSED) {
   // signature: void sys_pthread_exit(void) NO_RETURN;
   uint32_t* args UNUSED= ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 1);
   pthread_exit();
   NOT_REACHED();
 }
@@ -473,15 +544,17 @@ void sys_pt_exit(struct intr_frame* f UNUSED) {
 void sys_pt_join(struct intr_frame* f UNUSED) {
   // signature: tid_t sys_pthread_join(tid_t tid);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
   tid_t join_tid = (tid_t)args[1];
   tid_t ret_tid = pthread_join(join_tid); 
   f->eax = ret_tid;
 }
 
-
 void sys_lock_init(struct intr_frame* f UNUSED) {
   // signature: bool lock_init(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  exit_if_error(f, (uint8_t*)(args + 1), true);
   char* lock_id_ptr = (char*)args[1];
   if (lock_id_ptr == NULL) {
     f->eax = false;
@@ -513,6 +586,8 @@ void sys_lock_init(struct intr_frame* f UNUSED) {
 void sys_lock_acquire(struct intr_frame* f UNUSED) {
   // signature: void lock_acquire(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  exit_if_error(f, (uint8_t*)(args + 1), true);
   uint8_t lock_id = *(char*)args[1];
   bool success = false;
   struct thread* current_thread = thread_current();
@@ -538,6 +613,8 @@ void sys_lock_acquire(struct intr_frame* f UNUSED) {
 void sys_lock_release(struct intr_frame* f UNUSED) {
   // signature: void lock_release(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  exit_if_error(f, (uint8_t*)(args + 1), true);
   uint8_t lock_id = *(char*)args[1];
   struct thread* current_thread = thread_current();
   struct process* pcb = current_thread->pcb;
@@ -557,6 +634,8 @@ void sys_lock_release(struct intr_frame* f UNUSED) {
 void sys_sema_init(struct intr_frame* f UNUSED) {
   // signature: bool sema_init(char* sema, int val);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 3);
+  exit_if_error(f, (uint8_t*)(args + 1), true);
   uint8_t* sema_id_ptr = (uint8_t*)args[1];
   if (sema_id_ptr == NULL) {
     f->eax = false;
@@ -593,6 +672,8 @@ void sys_sema_init(struct intr_frame* f UNUSED) {
 void sys_sema_down(struct intr_frame* f UNUSED) {
   // signature: void sema_down(char* sema);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  exit_if_error(f, (uint8_t*)(args + 1), true);
   uint8_t sema_id = *(uint8_t*)args[1];
   bool success = false;
   struct thread* current_thread = thread_current();
@@ -616,6 +697,8 @@ void sys_sema_down(struct intr_frame* f UNUSED) {
 void sys_sema_up(struct intr_frame* f UNUSED) {
   // signature: void sema_up(char* sema);
   uint32_t* args = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  exit_if_error(f, (uint8_t*)(args + 1), true);
   uint8_t sema_id = *(uint8_t*)args[1];
   struct thread* current_thread = thread_current();
   struct process* pcb = current_thread->pcb;
@@ -633,6 +716,7 @@ void sys_sema_up(struct intr_frame* f UNUSED) {
 void sys_get_tid(struct intr_frame* f UNUSED) {
   // signature: tid_t get_tid(void);
   uint32_t* args UNUSED= ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 1);
   f->eax = thread_tid();
 }
 
@@ -649,8 +733,10 @@ void sys_get_tid(struct intr_frame* f UNUSED) {
 
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
-  // uint32_t* args = ((uint32_t*)f->esp);
-  uint32_t syscall_number = *(uint32_t*)(f->esp);
+  uint32_t* args = ((uint32_t*)f->esp);
+  // stack pointer validation check
+  exit_if_user_address_space_overflow(args, 1);
+  uint32_t syscall_number = args[0];
 
   /*
    * The following print statement, if uncommented, will print out the syscall

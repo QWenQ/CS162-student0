@@ -2,6 +2,7 @@
 #define USERPROG_PROCESS_H
 
 #include "threads/thread.h"
+#include "kernel/hash.h"
 #include <stdint.h>
 
 // At most 8MB can be allocated to the stack
@@ -87,6 +88,12 @@ struct process {
 
   struct rw_lock rw_on_semas_;
   struct semaphore** semas_; // 256 struct semaphore pointers
+
+// #ifdef VM
+  /* vitual memory fields */
+  struct lock lock_on_vm_; // lock before accessing virtual memory
+  struct hash spt_; // supplemental page table
+// #endif
 };
 
 void userprog_init(void);

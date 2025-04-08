@@ -19,6 +19,8 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "vm/frame.h"
+#include "vm/page.h"
 
 
 
@@ -161,6 +163,12 @@ static void start_process(void* file_name_) {
     uint64_t* allocated_page = (uint64_t*)palloc_get_page(PAL_ZERO | PAL_ASSERT);
     new_pcb->locks_ = (struct lock*)allocated_page;
     new_pcb->semas_ = (struct semaphore*)(allocated_page + USER_LOCK_SIZE);
+
+#ifdef VM
+    /* vitual memory fields */
+    lock_init(&new_pcb->lock_on_vm_);
+    supplemental_page_table_init(new_pcb, &new_pcb->spt_);
+#endif
   }
 
   /* Initialize interrupt frame and load executable. */
@@ -308,41 +316,6 @@ void process_exit(void) {
 
   printf("%s: exit(%d)\n", pcb->process_name, cur->exit_status_);
 
-  // // for user threads in the same process, all of them execept current one should be terminated immediately
-  // {
-  //   struct list_elem* e = NULL;
-  //   enum intr_level old_level = intr_disable();
-  //   for (e = list_begin(&(pcb->pthreads_list_)); e != list_end(&(pcb->pthreads_list_)); e = list_next(e)) {
-  //     struct pthread_meta* meta = list_entry(e, struct pthread_meta, p_elem_);
-  //     if ((meta->thread_ != NULL) && (meta->thread_ != cur)) {
-  //       list_remove(&(meta->thread_->elem));
-  //       list_remove(&(meta->thread_->allelem));
-  //       // deallocate user thread's user stack
-  //       deallocateUserStack(meta->thread_);
-  //       // deallocate user thread's kernel stack
-  //       palloc_free_page(meta->thread_);
-  //       meta->thread_ = NULL;
-  //     }
-  //   }
-
-  //   // close open files and free open file array
-  //   for (size_t i = 2; i < MAX_FILES; ++i) {
-  //     if (pcb->open_files_[i]) {
-  //       struct file_info* info = pcb->open_files_[i];    
-  //       file_close(info->file_);
-  //       info->file_ = NULL;
-  //       free(info->file_name_);
-  //       info->file_name_ = NULL;
-  //       free(info);
-  //       pcb->open_files_[i] = NULL;
-  //     }
-  //   }
-  //   free(pcb->open_files_);
-  //   pcb->open_files_ = NULL;
-    
-  //   intr_set_level(old_level);
-  // }
-
   // update current process into in the kernel
   struct list_elem* e = NULL;
   struct process_meta* process_info = NULL;
@@ -357,6 +330,7 @@ void process_exit(void) {
     thread_exit();
     NOT_REACHED();
   }
+
   // update process' running state
   lock_acquire(&(process_info->lock_));
   process_info->is_alive_ = false;
@@ -377,6 +351,9 @@ void process_exit(void) {
          directory before destroying the process's page
          directory, or our active page directory will be one
          that's been freed (and cleared). */
+#ifdef VM
+    deallocate_all_pages(cur->pcb);
+#endif
     cur->pcb->pagedir = NULL;
     pagedir_activate(NULL);
     pagedir_destroy(pd);
@@ -790,11 +767,12 @@ static bool validate_segment(const struct Elf32_Phdr* phdr, struct file* file) {
    Return true if successful, false if a memory allocation error
    or disk read error occurs. */
 static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
-                         uint32_t zero_bytes, bool writable) {
+                         uint32_t zero_bytes UNUSED, bool writable) {
   ASSERT((read_bytes + zero_bytes) % PGSIZE == 0);
   ASSERT(pg_ofs(upage) == 0);
   ASSERT(ofs % PGSIZE == 0);
 
+#ifndef VM
   file_seek(file, ofs);
   while (read_bytes > 0 || zero_bytes > 0) {
     /* Calculate how to fill this page.
@@ -826,6 +804,29 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
     zero_bytes -= page_zero_bytes;
     upage += PGSIZE;
   }
+#else
+  // virtual memory pageing
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  file_seek(file, ofs);
+  while (read_bytes > 0 || zero_bytes > 0) {
+    size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
+    size_t page_zero_bytes = PGSIZE - page_read_bytes;
+
+    // allocate an virtual page but not a physical frame 
+    bool success = allocate_page(pcb, upage, writable, file, ofs, page_read_bytes);
+    if (!success) {
+      return false;
+    }
+
+    /* Advance. */
+    read_bytes -= page_read_bytes;
+    zero_bytes -= page_zero_bytes;
+    upage += PGSIZE;
+    ofs += page_read_bytes;
+  }
+#endif
+
   return true;
 }
 
@@ -835,6 +836,7 @@ static bool setup_stack(void** esp) {
   uint8_t* kpage;
   bool success = false;
 
+#ifndef VM
   kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage != NULL) {
     success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
@@ -843,6 +845,13 @@ static bool setup_stack(void** esp) {
     else
       palloc_free_page(kpage);
   }
+#else
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  success = allocate_page(pcb, (uint8_t*)(PHYS_BASE - PGSIZE), true, NULL, 0, 0);
+  *esp = PHYS_BASE;
+#endif
+
   return success;
 }
 
@@ -885,6 +894,8 @@ bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED, void* arg) {
   void* tfun_arg = (void*)array[2];
   bool success = false;
   uint32_t start = PHYS_BASE;
+
+#ifndef VM
   uint8_t* kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage == NULL) return false;
   // allocate a new user-level stack from PYHS_BASE downwards and set the args
@@ -913,6 +924,29 @@ bool setup_thread(void (**eip)(void) UNUSED, void** esp UNUSED, void* arg) {
   if (!success) {
     palloc_free_page(kpage);
   }
+#else
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  start = get_free_page_from_top(pcb);
+  if (start > PGSIZE) {
+    success = allocate_page(pcb, (uint8_t*)start, true, NULL, 0, 0);
+    if (success) {
+      cur_thread->p_user_stack_addr_ = (uint8_t*)(start - PGSIZE);
+      // push args of SFUN
+      // void _pthread_start_stub(pthread_fun fun, void* arg)
+      uint32_t* sp = (uint32_t*)start;
+      --sp;
+      *sp = tfun_arg;
+      --sp;
+      *sp = tfun;
+      --sp;
+      *sp = NULL;
+      *esp = sp;
+      *eip = (void (*)(void))sfun;
+    }
+  }
+#endif
+
   return success; 
 }
 
@@ -946,7 +980,6 @@ tid_t pthread_execute(stub_fun sf UNUSED, pthread_fun tf UNUSED, void* arg UNUSE
   if (is_process_dying) return TID_ERROR;
   
 
-  // uint64_t* sp_args = (uint64_t*)palloc_get_page(PAL_ZERO | PAL_USER);
   uint64_t* sp_args = (uint64_t*)malloc(sizeof(uint64_t) * 6);
   if (sp_args == NULL) return TID_ERROR;
   struct semaphore sema;
@@ -993,7 +1026,6 @@ static void start_pthread(void* exec_ UNUSED) {
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
   bool success = setup_thread(&(if_.eip), &(if_.esp), exec_);
-  // palloc_free_page(exec_);
 
   if (!success) {
     // before exit, wake up current pthread's creator
@@ -1056,12 +1088,6 @@ tid_t pthread_join(tid_t tid UNUSED) {
 
   struct process* pcb = cur_thread->pcb;
   if (pcb == NULL) return TID_ERROR;
-
-  // lock_acquire(&(pcb->lock_on_cnt_));
-  // while (pcb->pthread_unadded_cnt_ > 0) {
-  //   cond_wait(&(pcb->cond_on_cnt), &(pcb->lock_on_cnt_));
-  // }
-  // lock_release(&(pcb->lock_on_cnt_));
 
   // valid join: thread was spawned in the same process and has not been waited on yet.
   struct list_elem* e = NULL;
@@ -1176,8 +1202,6 @@ void pthread_exit(void) {
    now, it does nothing. */
 void pthread_exit_main(void) {
 
-  // wakeUpAllWaitedThreads();
-
   // The main thread should wait on all threads in the process to terminate properly, before exiting itself.
   struct thread* main_thread = thread_current();
   struct process* pcb = main_thread->pcb;
@@ -1207,7 +1231,9 @@ void pthread_exit_main(void) {
   }
   rw_lock_release(&(pcb->lock_on_pthreads_list_), false);
   main_thread->exit_status_ = real_exit_code;
+#ifndef VM
   deallocateUserStack(main_thread);
+#endif
 
   process_exit();
 }

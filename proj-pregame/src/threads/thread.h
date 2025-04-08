@@ -100,8 +100,6 @@ struct thread {
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
 
-  int64_t wake_up_ticks_; /* time point when the thread will be woke up if the thread is sleeping */
-
   // for priority schedule
   struct list donated_list_; /* ordered by donated priorities decreasingly */
   struct lock* blocked_on_lock_; /* lock where the thread is blocked */
@@ -179,5 +177,8 @@ int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
 
 void update_mlfqs_info_if_mlfqs_on(int64_t ticks, int64_t timer_freq);
+
+void lock_on_file_system();
+void unlock_on_file_system();
 
 #endif /* threads/thread.h */

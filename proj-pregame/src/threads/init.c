@@ -41,6 +41,13 @@
 #include "filesys/fsutil.h"
 #endif
 
+
+#ifdef VM 
+#include "vm/frame.h"
+#include "vm/swap.h"
+#include "vm/page.h"
+#endif
+
 /* Page directory with kernel mappings only. */
 uint32_t* init_page_dir;
 
@@ -52,6 +59,8 @@ static bool format_filesys;
    overriding the defaults. */
 static const char* filesys_bdev_name;
 static const char* scratch_bdev_name;
+
+
 #ifdef VM
 static const char* swap_bdev_name;
 #endif
@@ -128,7 +137,11 @@ int main(void) {
   ide_init();
   locate_block_devices();
   filesys_init(format_filesys);
-#endif
+#ifdef VM
+  framesys_init();
+  swapsys_init();
+#endif // VM
+#endif // FILESYS
 
   // initialize FPU state
   asm volatile("finit" : : : "memory");
