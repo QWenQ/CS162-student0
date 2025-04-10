@@ -233,16 +233,11 @@ void sys_open(struct intr_frame* f UNUSED) {
   struct process* pcb = running_thread->pcb;
 
   lock_acquire(&(pcb->lock_on_file_));
-  // debug info
-  // printf("open() -> ");
 
   lock_on_file_system();
   struct file* open_file = filesys_open(file_name);
   unlock_on_file_system();
   if (open_file == NULL) {
-    // debug info
-    // printf("filesys_open(%s) failed.\n", file_name);
-
     lock_release(&(pcb->lock_on_file_));
     f->eax = -1;
     return;
@@ -251,9 +246,6 @@ void sys_open(struct intr_frame* f UNUSED) {
   // create and initilaize a new file_info node
   struct file_info* new_info = (struct file_info*)calloc(sizeof(struct file_info), 1);
   if (new_info == NULL) {
-    // debug info
-    // printf("calloc() for struct file_info failed.\n");
-
     lock_release(&(pcb->lock_on_file_));
     f->eax = -1;
     return;
@@ -261,9 +253,6 @@ void sys_open(struct intr_frame* f UNUSED) {
   int file_name_len = strlen(file_name);
   new_info->file_name_ = (char*)malloc(file_name_len + 1);
   if (new_info->file_name_ == NULL) {
-    // debug info
-    // printf("malloc() for file name string failed.\n");
-
     lock_release(&(pcb->lock_on_file_));
     free(new_info);
     f->eax = -1;
@@ -479,9 +468,6 @@ void sys_close(struct intr_frame* f UNUSED) {
   struct process* pcb = running_thread->pcb;
 
   lock_acquire(&(pcb->lock_on_file_));
-  // debug info
-  // printf("close() -> ");
-
   struct file_info* info = pcb->open_files_[fd];
   lock_on_file_system();
   file_close(info->file_);

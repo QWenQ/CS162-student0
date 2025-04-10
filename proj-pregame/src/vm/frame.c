@@ -85,7 +85,7 @@ static unsigned sharing_files_hash_func(const struct hash_elem* e, void* aux UNU
 static bool sharing_files_hash_less_func(const struct hash_elem* a, const struct hash_elem* b, void* aux UNUSED) {
     struct sharing_info* info_a = hash_entry(a, struct sharing_info, h_elem_);
     struct sharing_info* info_b = hash_entry(b, struct sharing_info, h_elem_);
-    return info_a->offset_ < info_b->offset_;
+    return (info_a->file_ < info_b->file_) || ((info_a->file_ == info_b->file_) && (info_a->offset_ < info_b->offset_));
 }
 
 // return true if initialization of SHARING_FILES_HASH is successful
@@ -216,21 +216,23 @@ static struct frame* evict() {
 static bool add_ref_to_sharing_frame(struct page_ref* cur_ref) {
     bool success = false;
     struct process* pcb = cur_ref->pcb_;
+
+    // a sharing page should be file page and ready-only
     struct spt_entry* spte = cur_ref->spte_;
     if (spte_is_writable(spte)) return false;
     struct file* file = spte_get_file(spte);
-    uint32_t upage = spte_get_virtual_addr(spte);
-    // a file page not dirty could be ready-only
-    if (file && !pagedir_is_dirty(pcb->pagedir, upage)) {
-        off_t offset = spte_get_offset(spte);
-        struct sharing_info* info = get_sharing(file, offset);
-        if (info) {
-            // add a new page reference to the frame's ref list
-            pagedir_set_page(pcb->pagedir, upage, info->frame_->kpage_, false);
-            list_push_front(&info->frame_->refs_, &cur_ref->l_elem_);
-            success = true;
-        }
+    if (file == NULL) return false;
+
+    off_t offset = spte_get_offset(spte);
+    struct sharing_info* info = get_sharing(file, offset);
+    if (info) {
+        uint32_t upage = spte_get_virtual_addr(spte);
+        // add a new page reference to the frame's ref list
+        pagedir_set_page(pcb->pagedir, upage, info->frame_->kpage_, false);
+        list_push_front(&info->frame_->refs_, &cur_ref->l_elem_);
+        success = true;
     }
+
     return success;
 }
 
@@ -375,7 +377,7 @@ bool allocate_frame(struct process* pcb, struct spt_entry* spte) {
     lock_paging();
 
     // 1. if the page is sharing, get sharing frame from sharing_files_hash, add a new page reference to the frame’s ref list, 
-    // allocated_success = add_ref_to_sharing_frame(cur_ref);
+    allocated_success = add_ref_to_sharing_frame(cur_ref);
 
     // 2. if user pool is not emtpy, get a free frame from the pool;
     if (!allocated_success) {
