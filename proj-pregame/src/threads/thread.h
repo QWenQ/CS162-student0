@@ -7,6 +7,12 @@
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
 
+
+#ifdef VM
+#define STACK_LIMTI_ON_SIZE (1 << 23)
+#define STACK_LIMIT_ADDR (PHYS_BASE - STACK_LIMIT_ON_SIZE)
+#endif
+
 /* States in a thread's life cycle. */
 enum thread_status {
   THREAD_RUNNING, /* Running thread. */
@@ -117,6 +123,12 @@ struct thread {
 #ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */
+#endif
+
+
+#ifdef VM
+  /* stack growth fields */
+  uint32_t* esp_; // user stack pointer record when a manual switch from user to kernel
 #endif
 
   /* Owned by thread.c. */

@@ -116,7 +116,7 @@ void supplemental_page_table_init(struct process* pcb ,struct hash* spt) {
 bool allocate_page(struct process* p, uint8_t* vaddr, bool writable, struct file* file, off_t offset, uint32_t size) {
     struct spt_entry* spte = (struct spt_entry*)calloc(sizeof(struct spt_entry), 1);
     if (spte == NULL) return false;
-    spte->upage_ = vaddr;
+    spte->upage_ = ((uint32_t)vaddr & PTE_ADDR);
     spte->is_writable_ = writable;
     spte->file_ = file;
     spte->offset_ = offset;

@@ -8,6 +8,10 @@
 
 // #define PHYS_BASE 0xc0000000 /* 3 GB. */
 
+#ifdef VM
+#define PF_U 0x4 /* 0: kernel, 1: user process. */
+#endif
+
 #define SIZE_OF_FPU 108 /* length of FPU is 108 bytes */
 
 static int get_user(const uint8_t *uaddr);
@@ -719,6 +723,17 @@ void sys_get_tid(struct intr_frame* f UNUSED) {
 
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
+
+#ifdef VM
+  // for stack growth
+  // save user stack pointer to current thread when a context switch from user to kernel occurs
+  struct thread* cur_thread = thread_current();
+  bool user = (f->error_code & PF_U) != 0;
+  if (user) {
+    cur_thread->esp_ = f->esp;
+  }
+#endif
+
   uint32_t* args = ((uint32_t*)f->esp);
   // stack pointer validation check
   exit_if_user_address_space_overflow(args, 1);

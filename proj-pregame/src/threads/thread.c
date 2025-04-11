@@ -737,6 +737,10 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->blocked_on_lock_ = NULL;
   t->magic = THREAD_MAGIC;
 
+#ifdef VM
+  t->esp_ = PHYS_BASE - PGSIZE;
+#endif
+
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
 

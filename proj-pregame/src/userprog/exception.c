@@ -208,6 +208,18 @@ static void page_fault(struct intr_frame* f) {
       struct process* pcb = cur_thread->pcb;
       bool success = true;
 
+      // save user stack pointer to current thread when a context switch from user to kernel occurs
+      if (user) {
+         cur_thread->esp_ = f->esp;
+      }
+
+
+      // stack growth check: the fault address is user address and above the user stack pointer esp_ in struct thread
+      // and the PUSHA instruction pushes 32 bytes at once, so it can fault 32 bytes below the stack pointer.
+      if (is_user_vaddr(fault_addr) && ((uint32_t*)fault_addr + 8 >= cur_thread->esp_)) {
+         allocate_page(pcb, fault_addr, true, NULL, 0, 0);
+      }
+
       // user memory validation check: the user memory should be allocated already
       success = user_memory_validation_check(pcb, fault_addr);
       if (!success) {
