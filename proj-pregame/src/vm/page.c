@@ -141,19 +141,21 @@ static void clear_dirty_page(struct hash_elem* e, void* aux) {
     if (spte->swap_slot_idx_ != INVALID_SWAP_SLOT_INDEX) {
         // wait until the dirty page has been written into the swap
         spte_swap_sema_down(spte);
-        if (spte->file_ && spte->size_ > 0) {
-            // write dirty file pages
+        // write file dirty page dirty back to the process virtual space
+        if (spte->file_ && spte->size_ > 0 && pagedir_is_dirty(p->pagedir, spte->upage_)) {
             if (pagedir_get_page(p->pagedir, spte->upage_) == NULL) {
                 allocate_frame_for_page(p, spte->upage_);
             }
-            file_write_at(spte->file_, spte->upage_, spte->size_, spte->offset_);
-            pagedir_set_dirty(p->pagedir, spte->upage_, false);
         }
-        else {
-            // free swap slots occupied by dirty anonymity pages
-            free_swap_slot(spte->swap_slot_idx_);
-        }
+        // free swap slots occupied by dirty page
+        free_swap_slot(spte->swap_slot_idx_);
         spte_set_swap_index(spte, INVALID_SWAP_SLOT_INDEX);
+    }
+
+    // write file dirty data back to file 
+    if (spte->file_ && spte->size_ > 0 && pagedir_is_dirty(p->pagedir, spte->upage_)) {
+        file_write_at(spte->file_, spte->upage_, spte->size_, spte->offset_);
+        pagedir_set_dirty(p->pagedir, spte->upage_, false);
     }
 }
 
@@ -178,9 +180,23 @@ void deallocate_all_pages(struct process* p) {
     // page table will be destroty by the caller 
 }
 
+// deallocate page pointed by UADDR in process PCB
+void deallocate_page(struct process* pcb, uint8_t* upage) {
+    struct spt_entry key;
+    key.upage_ = upage;
+    lock_on_vm(pcb);
+    struct hash_elem* e = hash_delete(&pcb->spt_, &key.h_elem_);
+    unlock_on_vm(pcb);
+    struct spt_entry* spte = hash_entry(e, struct spt_entry, h_elem_);
+    // struct spt_entry* spte = get_spte_of_page(pcb, upage);
+    if (spte) {
+        clear_dirty_page(&spte->h_elem_, pcb);
+        free_page(&spte->h_elem_, pcb);
+    }
+}
 
 
-// allocate a frame; data handling; update PTE/SPTE;
+// allocate a frame; data initialization if necessary; update PTE/SPTE;
 // return true if op successes
 bool allocate_frame_for_page(struct process* p, uint8_t* vaddr) {
     bool success = false;

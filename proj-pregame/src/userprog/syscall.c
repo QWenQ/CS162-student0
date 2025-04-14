@@ -705,9 +705,132 @@ void sys_sema_up(struct intr_frame* f UNUSED) {
 
 void sys_get_tid(struct intr_frame* f UNUSED) {
   // signature: tid_t get_tid(void);
-  uint32_t* args UNUSED= ((uint32_t*)f->esp);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 1);
   f->eax = thread_tid();
+}
+
+void sys_mmap(struct intr_frame* f UNUSED) {
+  // signature: mapid_t mmap(int fd, void* addr);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 3);
+  int fd = (int)args[1];
+  void* addr = (void*)args[2];
+  // exit_if_error(f, addr, false);
+
+  struct file* file = NULL;
+
+  /* error cases */
+  // 1. `addr` is not page-aligned; 2. `addr == 0`; 3. `fd == 0` or `fd == 1`;
+  if ((((uint32_t)addr & PGMASK) != 0) || (addr == 0) || (fd == 0) || (fd == 1)) {
+    f->eax = -1;
+    return;
+  }
+
+  // 4. file open as `fd` has a length of zero bytes;
+  int file_size = 0;
+  struct thread* running_thread = thread_current();
+  struct process* pcb = running_thread->pcb;
+  lock_acquire(&(pcb->lock_on_file_));
+  struct file_info* info = pcb->open_files_[fd];
+  if (info != NULL) {
+    lock_on_file_system();
+    file_size = file_length(info->file_);
+    unlock_on_file_system();
+    file = info->file_;
+  }
+  lock_release(&(pcb->lock_on_file_));
+  if (file_size == 0) {
+    f->eax = -1;
+    return;
+  }
+
+  // 5. range of pages mapped overlaps any existing set of mapped pages;
+  bool get_consecutive_memory = true;
+  int page_cnt = file_size / PGSIZE;
+  if ((file_size & PGMASK) != 0) {
+    ++page_cnt;
+  }
+  for (int offset = 0; offset < page_cnt; ++offset) {
+    if (is_page_valid(pcb, addr + offset * PGSIZE)) {
+      get_consecutive_memory = false;
+      break;
+    }
+  }
+
+  if (!get_consecutive_memory) {
+    f->eax = -1;
+    return;
+  }
+
+  // allocate a struct mmap_entry object for the file FD and add it to the process
+  struct mmap_entry* mmap_ent = (struct mmap_entry*)malloc(sizeof(struct mmap_entry));
+  if (mmap_ent == NULL) {
+    f->eax = -1;
+    return;
+  }
+  mmap_ent->mapid_ = pcb->next_map_id_;
+  ++pcb->next_map_id_;
+  list_init(&mmap_ent->m_page_list_);
+  list_push_front(&(pcb->mmap_list_), &(mmap_ent->l_elem_));
+
+
+  // allocate page for the file
+  for (int offset = 0; offset < page_cnt; ++offset) {
+    struct mmap_page* m_page = (struct mmap_page*)malloc(sizeof(struct mmap_page));
+    m_page->file_ = file_reopen(file);
+    m_page->upage_ = addr + offset * PGSIZE;
+    list_push_back(&mmap_ent->m_page_list_, &m_page->l_elem_);
+    uint32_t size = 0;
+    if (file_size >= PGSIZE) {
+      size = PGSIZE;
+    }
+    else {
+      size = file_size;
+    }
+    file_size -= size;
+    allocate_page(pcb, m_page->upage_, true, m_page->file_, offset * PGSIZE, size);
+  }
+
+  f->eax = mmap_ent->mapid_;
+}
+
+void sys_munmap(struct intr_frame* f UNUSED) {
+  // signature: void munmap(mapid_t);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  mapid_t map_id = (mapid_t)args[1];
+
+  // map id validation check
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  struct list_elem* e = NULL;
+  struct mmap_entry* ent = NULL;
+  for (e = list_begin(&pcb->mmap_list_); e != list_end(&pcb->mmap_list_); e = list_next(e)) {
+    ent = list_entry(e, struct mmap_entry, l_elem_);
+    if (ent->mapid_ == map_id) {
+      list_remove(e);
+      break;
+    }
+    ent = NULL;
+  }
+
+  // return if mapping doesn't exist
+  if (ent == NULL) {
+    f->eax = -1;
+    return;
+  }
+
+  // write all memory mapped dirty page data back to file
+  e = NULL;
+  while (!list_empty(&ent->m_page_list_)) {
+    e = list_pop_front(&ent->m_page_list_);
+    struct mmap_page* m_page = list_entry(e, struct mmap_page, l_elem_);
+    deallocate_page(pcb, m_page->upage_);
+    file_close(m_page->file_);
+    free(m_page);
+  }
+  free(ent);
 }
 
 // template
@@ -822,6 +945,12 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
   else if (syscall_number == SYS_GET_TID) {
     sys_get_tid(f);
+  }
+  else if (syscall_number == SYS_MMAP) {
+    sys_mmap(f);
+  }
+  else if (syscall_number == SYS_MUNMAP) {
+    sys_munmap(f);
   }
   else {
     // do nothing

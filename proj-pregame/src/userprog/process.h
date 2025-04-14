@@ -5,6 +5,7 @@
 #include "kernel/hash.h"
 #include <stdint.h>
 
+
 // At most 8MB can be allocated to the stack
 // These defines will be used in Project 2: Multithreading
 #define MAX_STACK_PAGES (1 << 11)
@@ -58,6 +59,28 @@ struct file_info {
 };
 
 
+#ifdef VM
+
+typedef int mapid_t;
+
+/* info of a memory mapped page */
+struct mmap_page {
+  struct file* file_; // memory mapped file
+  void* upage_; // start virtual address
+  struct list_elem l_elem_; // managed by M_PAGE_LIST_ in struct mmap_entry
+};
+
+/* info of a memory map file */
+struct mmap_entry {
+  mapid_t mapid_; // unique identifier for a mapping
+  // int fd_; // memory mapped file descriptor
+  struct list m_page_list_; // set of all pages of a file
+  struct list_elem l_elem_; // managed by MMAP_LIST_ in struct process
+};
+
+#endif
+
+
 /* The process control block for a given process. Since
    there can be multiple threads per process, we need a separate
    PCB from the TCB. All TCBs in a process will have a pointer
@@ -89,11 +112,15 @@ struct process {
   struct rw_lock rw_on_semas_;
   struct semaphore** semas_; // 256 struct semaphore pointers
 
-// #ifdef VM
+#ifdef VM
   /* vitual memory fields */
   struct lock lock_on_vm_; // lock before accessing virtual memory
   struct hash spt_; // supplemental page table
-// #endif
+
+  /* mmap fields */
+  mapid_t next_map_id_; // the next map id assignd to the new mapping
+  struct list mmap_list_; // manage struct mmap_entry objects
+#endif
 };
 
 void userprog_init(void);

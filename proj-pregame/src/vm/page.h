@@ -32,7 +32,9 @@ void spte_swap_sema_up(struct spt_entry* spte);
 void supplemental_page_table_init(struct process* pcb, struct hash* spt);
 bool allocate_page(struct process* pcb, uint8_t* vaddr, bool writable, struct file* file, off_t offset, uint32_t size);
 
+
 void deallocate_all_pages(struct process* pcb);
+void deallocate_page(struct process* pcb, uint8_t* vaddr);
 
 bool allocate_frame_for_page(struct process* pcb, uint8_t* vaddr);
 

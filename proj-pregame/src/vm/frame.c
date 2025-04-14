@@ -332,8 +332,7 @@ static void clean_up_evicted_frame(struct frame* frame) {
     e = NULL;
     // destroy evicted frame's reverse mappings
     while (!list_empty(&frame->refs_)) {
-        e = list_front(&frame->refs_);
-        list_remove(e);
+        e = list_pop_front(&frame->refs_);
         struct page_ref* cur_ref = list_entry(e, struct page_ref, l_elem_);
         free(cur_ref);
     }

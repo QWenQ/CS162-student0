@@ -168,6 +168,9 @@ static void start_process(void* file_name_) {
     /* vitual memory fields */
     lock_init(&new_pcb->lock_on_vm_);
     supplemental_page_table_init(new_pcb, &new_pcb->spt_);
+    /* mmap fields */
+    new_pcb->next_map_id_ = 0;
+    list_init(&new_pcb->mmap_list_);
 #endif
   }
 
@@ -289,9 +292,7 @@ int process_wait(pid_t child_pid UNUSED) {
   // deallocate all element if current process is Pintos Main
   if (current_process->main_thread->tid == 1) {
     while (!list_empty(&process_state_list)) {
-      e = list_front(&process_state_list);
-      list_remove(e);
-      e = NULL;
+      e = list_pop_front(&process_state_list);
       process_info = list_entry(e, struct process_meta, p_s_elem_);
       free(process_info);
       process_info = NULL;
@@ -352,7 +353,22 @@ void process_exit(void) {
          directory, or our active page directory will be one
          that's been freed (and cleared). */
 #ifdef VM
-    deallocate_all_pages(cur->pcb);
+    // unmap all memory mapped pages
+    while (!list_empty(&pcb->mmap_list_)) {
+      struct list_elem* e = list_pop_front(&pcb->mmap_list_);
+      struct mmap_entry* ent = list_entry(e, struct mmap_entry, l_elem_);
+
+      while (!list_empty(&ent->m_page_list_)) {
+        struct list_elem* ee = list_pop_front(&ent->m_page_list_);
+        struct mmap_page* m_page = list_entry(ee, struct mmap_page, l_elem_);
+        deallocate_page(pcb, m_page->upage_);
+        file_close(m_page->file_);
+        free(m_page);
+      }
+      free(ent);
+    }
+
+    deallocate_all_pages(pcb);
 #endif
     cur->pcb->pagedir = NULL;
     pagedir_activate(NULL);
@@ -1218,8 +1234,7 @@ void pthread_exit_main(void) {
   int real_exit_code = main_thread->exit_status_;
   rw_lock_acquire(&(pcb->lock_on_pthreads_list_), false);
   while (!list_empty(&(pcb->pthreads_list_))) {
-    e = list_begin(&(pcb->pthreads_list_));
-    list_remove(e);
+    e = list_pop_front(&pcb->pthreads_list_);
     struct pthread_meta* meta = list_entry(e, struct pthread_meta, p_elem_);
     if (meta->exit_code_ == -1) {
       real_exit_code = -1;
