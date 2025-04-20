@@ -40,6 +40,16 @@ char* echo(char* input) {
   char* ret;
 
   /* TODO */
+  char** result = echo_1(&input, clnt);
+  if (result == (char**)NULL) {
+    clnt_perror(clnt, "call failed");
+    exit(1);
+  }
+
+  ret = strdup(*result);
+
+  /* Free previous result */
+  xdr_free((xdrproc_t)xdr_string, (char*)result);
 
   clnt_destroy(clnt);
   
@@ -51,17 +61,41 @@ void put(buf key, buf value) {
 
   /* TODO */
 
+  // initialize put request passed to the server
+  put_request req;
+  req.key = &key;
+  req.val = &value;
+
+  void* result = put_1(&req, clnt);
+  if (result == NULL) {
+    clnt_perror(clnt, "call failed");
+    exit(1);
+  }
+
+  /* Free previous result */
+  xdr_free((xdrproc_t)xdr_pointer, (char**)result);
+
   clnt_destroy(clnt);
 }
 
 buf* get(buf key) {
   CLIENT *clnt = clnt_connect(HOST);
 
-  buf* ret;
-
   /* TODO */
+  static buf ret;
+  buf* result = get_1(&key, clnt);
+  if (result->buf_len == 0) {
+    clnt_perror(clnt, "call failed");
+    exit(1);
+  }
+
+  ret.buf_len = result->buf_len;
+  ret.buf_val = result->buf_val;
+
+  /* Free previous result */
+  // xdr_free((xdrproc_t)xdr_buf, (buf*)result);
 
   clnt_destroy(clnt);
   
-  return ret;
+  return &ret;
 }
