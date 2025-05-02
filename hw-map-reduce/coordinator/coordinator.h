@@ -25,6 +25,10 @@
 
 typedef struct {
   /* TODO */
+  int job_id_allocator_; // allocate unique job ID for every job submitted
+  GList* map_work_list_;     // list of map works of all jobs
+  GList* reduce_work_list_;     // list of reduce works of some job
+  GHashTable* job_set_;  // set of info of jobs
 } coordinator;
 
 void coordinator_init(coordinator** coord_ptr);
