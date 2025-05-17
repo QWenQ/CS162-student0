@@ -15,8 +15,8 @@
 #include "userprog/process.h"
 #endif
 
-// ensure that only one process at a time is executing file system code
-static struct lock lock_on_filesys;
+// // ensure that only one process at a time is executing file system code
+// static struct lock lock_on_filesys;
 
 /* FPU */
 #define SIZE_OF_FPU 108 /* length of state of FPU is 108 bytes */
@@ -168,7 +168,7 @@ void thread_init(void) {
   list_init(&fifo_ready_list);
   mlfqs_info_init();
   list_init(&all_list);
-  lock_init(&lock_on_filesys);
+  // lock_init(&lock_on_filesys);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread();
@@ -245,7 +245,6 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   /* Allocate thread. */
   t = palloc_get_page(PAL_ZERO);
   if (t == NULL) {
-    // debug
     void;
     return TID_ERROR;
   }
@@ -917,10 +916,10 @@ static tid_t allocate_tid(void) {
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);
 
-void lock_on_file_system() {
-  lock_acquire(&lock_on_filesys);
-}
+// void lock_on_file_system() {
+//   lock_acquire(&lock_on_filesys);
+// }
 
-void unlock_on_file_system() {
-  lock_release(&lock_on_filesys);
-}
+// void unlock_on_file_system() {
+//   lock_release(&lock_on_filesys);
+// }

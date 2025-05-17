@@ -422,7 +422,7 @@ static struct frame* search_frame_referred_by(struct process* pcb, struct spt_en
     return frame;
 }
 
-/* free the frame allocated to page VADDR in process PCB */
+/* free the frame allocated to page pointed by SPTE in process PCB */
 void deallocate_frame(struct process* pcb, struct spt_entry* spte) {
     lock_paging();
     struct frame* frame = search_frame_referred_by(pcb, spte);

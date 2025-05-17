@@ -174,6 +174,7 @@ static void start_process(void* file_name_) {
 #endif
   }
 
+
   /* Initialize interrupt frame and load executable. */
   if (success) {
     memset(&if_, 0, sizeof if_);
@@ -183,6 +184,7 @@ static void start_process(void* file_name_) {
     // success = load(file_name, &if_.eip, &if_.esp);
     success = load(cmd_args, &if_.eip, &if_.esp);
   }
+
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
   if (!success && pcb_success) {
@@ -198,13 +200,13 @@ static void start_process(void* file_name_) {
     free(pcb_to_free);
   }
 
-
   /* Clean up. Exit on failure or jump to userspace */
   if (!success) {
     // wake up parent
     sema_up(sema);
     thread_exit();
   }
+
 
   // add a new struct execution_info PROCESS_STATE_LIST
   struct thread* cur_thread = thread_current();
@@ -513,6 +515,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   bool success = false;
   int i;
 
+
   /* Allocate and activate page directory. */
   t->pcb->pagedir = pagedir_create();
   if (t->pcb->pagedir == NULL)
@@ -553,11 +556,14 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   
   // 3. load ELF executable from real file name parsed above;
   /* Open executable file. */
+  // lock_on_file_system();
   file = filesys_open(file_name);
+  // unlock_on_file_system();
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
     goto done;
   }
+
 
   /* Read and verify executable header. */
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
@@ -566,6 +572,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
     printf("load: %s: error loading executable\n", file_name);
     goto done;
   }
+
 
   /* Read program headers. */
   file_ofs = ehdr.e_phoff;
@@ -617,9 +624,11 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
     }
   }
 
+
   /* Set up stack. */
   if (!setup_stack(esp))
     goto done;
+
 
   // record main thread's user stack address
   t->p_user_stack_addr_ = (uint8_t*)(PHYS_BASE - PGSIZE);
@@ -709,6 +718,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   }
 
   file_deny_write(file);
+
 
 done:
   /* We arrive here whether the load is successful or not. */

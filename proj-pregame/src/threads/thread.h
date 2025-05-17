@@ -190,7 +190,7 @@ int thread_get_load_avg(void);
 
 void update_mlfqs_info_if_mlfqs_on(int64_t ticks, int64_t timer_freq);
 
-void lock_on_file_system();
-void unlock_on_file_system();
+// void lock_on_file_system();
+// void unlock_on_file_system();
 
 #endif /* threads/thread.h */

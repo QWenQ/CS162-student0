@@ -9,6 +9,7 @@
 #include "threads/thread.h"
 #include "lib/string.h"
 #include "threads/malloc.h"
+#include "filesys/cache.h"
 
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -186,6 +187,8 @@ static void wake_up_sleeping_threads(void) {
 /* Timer interrupt handler. */
 static void timer_interrupt(struct intr_frame* args UNUSED) {
   ticks++;
+
+  buffer_cache_flush_countdown();
 
   wake_up_sleeping_threads();
 

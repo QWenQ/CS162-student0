@@ -6,6 +6,8 @@
 #include "filesys/inode.h"
 #include "threads/malloc.h"
 
+#include "threads/thread.h"
+
 /* A directory. */
 struct dir {
   struct inode* inode; /* Backing store. */
@@ -77,7 +79,7 @@ static bool lookup(const struct dir* dir, const char* name, struct dir_entry* ep
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
 
-  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e)
+  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e) {
     if (e.in_use && !strcmp(name, e.name)) {
       if (ep != NULL)
         *ep = e;
@@ -85,6 +87,8 @@ static bool lookup(const struct dir* dir, const char* name, struct dir_entry* ep
         *ofsp = ofs;
       return true;
     }
+  }
+  
   return false;
 }
 
@@ -97,6 +101,8 @@ bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
 
   ASSERT(dir != NULL);
   ASSERT(name != NULL);
+
+  struct thread* cur = thread_current();
 
   if (lookup(dir, name, &e, NULL))
     *inode = inode_open(e.inode_sector);
