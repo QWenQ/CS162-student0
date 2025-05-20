@@ -68,9 +68,10 @@ void filesys_init(bool format) {
 void filesys_done(void) { 
   // close buffer cache 
   flush_all_caches();
-  buffer_cache_destroy();
 
   free_map_close(); 
+
+  buffer_cache_destroy();
 }
 
 /* Creates a file named NAME with the given INITIAL_SIZE.

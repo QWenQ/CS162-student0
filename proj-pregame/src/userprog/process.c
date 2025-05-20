@@ -703,10 +703,6 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
     *esp -= sizeof(int);
     *(int*)(*esp) = args_nums - 1;
 
-    // debug
-    // printf("%p\n", *esp);
-    // hex_dump(0, *esp, command_bytes_used_in_stack, true);
-
     // 5. push a fake return address into the stack;
     *esp -= sizeof(0);
     *(int*)(*esp) = 0;

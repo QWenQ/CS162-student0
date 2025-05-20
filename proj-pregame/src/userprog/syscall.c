@@ -206,9 +206,7 @@ void sys_create(struct intr_frame* f UNUSED) {
   string_check(file);
   unsigned initial_size = (unsigned)args[2];
 
-  // lock_on_file_system();
   bool success = filesys_create(file, initial_size);
-  // unlock_on_file_system();
   f->eax = success ? 1 : 0;
 }
 
@@ -219,9 +217,7 @@ void sys_remove(struct intr_frame* f UNUSED) {
   const char* file_name = (const char*)args[1];
   string_check(file_name);
   
-  // lock_on_file_system();
   bool success = filesys_remove(file_name);
-  // unlock_on_file_system();
 
   f->eax = success ? 1 : 0;
 }
@@ -238,9 +234,7 @@ void sys_open(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
 
-  // lock_on_file_system();
   struct file* open_file = filesys_open(file_name);
-  // unlock_on_file_system();
   if (open_file == NULL) {
     lock_release(&(pcb->lock_on_file_));
     f->eax = -1;
@@ -280,9 +274,7 @@ void sys_open(struct intr_frame* f UNUSED) {
 
   if ((int)f->eax == -1) {
     free(new_info->file_name_);
-    // lock_on_file_system();
     file_close(new_info->file_);
-    // unlock_on_file_system();
     free(new_info);
   }
 }
@@ -304,9 +296,7 @@ void sys_filesize(struct intr_frame* f UNUSED) {
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
   if (info != NULL) {
-    // lock_on_file_system();
     f->eax = file_length(info->file_);
-    // unlock_on_file_system();
   }
   lock_release(&(pcb->lock_on_file_));
 }
@@ -357,9 +347,7 @@ void sys_read(struct intr_frame* f UNUSED) {
   // rw_lock_acquire(&(pcb->file_rw_lock_), true);
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  // lock_on_file_system();
   f->eax = file_read(info->file_, buffer, size);
-  // unlock_on_file_system();
   // rw_lock_release(&(pcb->file_rw_lock_), true);
   lock_release(&(pcb->lock_on_file_));
   
@@ -403,9 +391,7 @@ void sys_write(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  // lock_on_file_system();
   f->eax = file_write(info->file_, buffer, size);
-  // unlock_on_file_system();
   lock_release(&(pcb->lock_on_file_));
 
 #ifdef VM
@@ -431,9 +417,7 @@ void sys_seek(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  // lock_on_file_system();
   file_seek(info->file_, position);
-  // unlock_on_file_system();
   lock_release(&(pcb->lock_on_file_));
 }
 
@@ -453,9 +437,7 @@ void sys_tell(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  // lock_on_file_system();
-  f->eax = file_tell(info);
-  // unlock_on_file_system();
+  f->eax = file_tell(info->file_);
   lock_release(&(pcb->lock_on_file_));
 }
 
@@ -473,9 +455,7 @@ void sys_close(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  // lock_on_file_system();
   file_close(info->file_);
-  // unlock_on_file_system();
   info->file_ = NULL;
   free(info->file_name_);
   info->file_name_ = NULL;
@@ -734,9 +714,7 @@ void sys_mmap(struct intr_frame* f UNUSED) {
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
   if (info != NULL) {
-    // lock_on_file_system();
     file_size = file_length(info->file_);
-    // unlock_on_file_system();
     file = info->file_;
   }
   lock_release(&(pcb->lock_on_file_));

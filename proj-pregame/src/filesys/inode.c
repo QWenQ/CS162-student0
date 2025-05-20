@@ -130,8 +130,6 @@ void inode_init(void) {
 
 // initalized file owned by DISK_INODE with LENGTH 0 bytes
 static void inode_sector_init(struct inode_disk* disk_inode, off_t length) {
-  // debug
-  // off_t old_length = length;
 
   // initialize memory with zeros
   static char zeros[BLOCK_SECTOR_SIZE];
@@ -189,41 +187,6 @@ static void inode_sector_init(struct inode_disk* disk_inode, off_t length) {
     }
   }
 
-
-  // debug
-  // if (length > 0) {
-  //   // printf direct pointers
-  //   for (int i = 0; i < 12; ++i) {
-  //     printf("direct pointers: %d\n", disk_inode->direct_[i]);
-  //   }
-
-  //   // printf indirect pointers
-  //   printf("indirect pointer: %d\n", disk_inode->indirect_);
-  //   block_sector_t directs[128];
-  //   memset(directs, 0, sizeof directs);
-  //   read_within_buffer_cache(disk_inode->indirect_, directs, 0, BLOCK_SECTOR_SIZE, false);
-  //   for (int i = 0; i < 128; ++i) {
-  //     printf("\tdirect pointers from indirect: %d\n", directs[i]);
-  //   }
-
-  //   // printf double indirect pointers
-  //   printf("double indirect pointer: %d\n", disk_inode->double_indirect_);
-  //   block_sector_t indirects[128];
-  //   read_within_buffer_cache(disk_inode->double_indirect_, indirects, 0, BLOCK_SECTOR_SIZE, false);
-  //   for (int i = 0; i < 128; ++i) {
-  //     printf("\tindirect pointers from double indirect: %d\n", indirects[i]);
-  //     if (indirects[i] == 0) {
-  //       break;
-  //     }
-  //     block_sector_t directs[128];
-  //     read_within_buffer_cache(indirects[i], directs, 0, BLOCK_SECTOR_SIZE, false);
-  //     for (int j = 0; j < 128; ++j) {
-  //       printf("\t\tdirect pointers from double indirect: %d\n", directs[j]);
-  //     } 
-  //   }
-  //   printf("original length = %d, and current length = %d\n", old_length, length);
-  //   ASSERT(length == 0);
-  // }
   // initialized block area should be LENGTH size
   ASSERT(length == 0);
 }
@@ -358,6 +321,10 @@ void inode_close(struct inode* inode) {
       free_map_release(inode->sector, 1);
       // free_map_release(inode->data_->start, bytes_to_sectors(inode->data_->length));
       inode_resize(inode->data_, 0);
+    }
+    else {
+      // write disk inode info back to disk
+      write_within_buffer_cache(inode->sector, inode->data_, 0, sizeof *inode->data_);
     }
 
     free(inode->data_);
@@ -655,9 +622,6 @@ static bool inode_resize(struct inode_disk* id, off_t size) {
             free_map_release(buffer[i], 1);
             buffer[i] = 0;
         } else {
-            // debug
-            ASSERT(buffer2[0] != 0);
-
             /* Write the updates to the double indirect block back to disk. */
             write_within_buffer_cache(buffer[i], buffer2, 0, BLOCK_SECTOR_SIZE);
         }
