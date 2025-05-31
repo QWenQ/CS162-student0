@@ -177,7 +177,7 @@ static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec
     key.sector_idx_ = sec_idx;
     lock_buffer_cache();
 
-    flush_if_timeout();
+    // flush_if_timeout();
 
     struct hash_elem* he = hash_find(&lru_hash, &key.h_elem_);
     if (he) {
@@ -270,6 +270,7 @@ void buffer_cache_destroy() {
         struct cached_sector* sec = list_entry(e, struct cached_sector, l_elem_);
         destroy_cached_sector(sec);
     }
+    hash_destroy(&lru_hash, NULL);
 }
 
 /* read data from sector SEC_IDX into BUFFER, 

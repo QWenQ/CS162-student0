@@ -186,6 +186,12 @@ void filesys_init(bool format) {
 /* Shuts down the file system module, writing any unwritten data
    to disk. */
 void filesys_done(void) { 
+
+  /* close root directory of pintos process */
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  dir_close(pcb->pwd_);
+
   // close buffer cache 
   flush_all_caches();
 

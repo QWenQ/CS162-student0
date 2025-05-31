@@ -352,46 +352,46 @@ void process_exit(void) {
   lock_release(&(process_info->lock_));
 
 
-  /* Destroy the current process's page directory and switch back
-     to the kernel-only page directory. */
-  pd = cur->pcb->pagedir;
-  if (pd != NULL) {
-    /* Correct ordering here is crucial.  We must set
-         cur->pcb->pagedir to NULL before switching page directories,
-         so that a timer interrupt can't switch back to the
-         process page directory.  We must activate the base page
-         directory before destroying the process's page
-         directory, or our active page directory will be one
-         that's been freed (and cleared). */
-#ifdef VM
-    // unmap all memory mapped pages
-    while (!list_empty(&pcb->mmap_list_)) {
-      struct list_elem* e = list_pop_front(&pcb->mmap_list_);
-      struct mmap_entry* ent = list_entry(e, struct mmap_entry, l_elem_);
+//   /* Destroy the current process's page directory and switch back
+//      to the kernel-only page directory. */
+//   pd = cur->pcb->pagedir;
+//   if (pd != NULL) {
+//     /* Correct ordering here is crucial.  We must set
+//          cur->pcb->pagedir to NULL before switching page directories,
+//          so that a timer interrupt can't switch back to the
+//          process page directory.  We must activate the base page
+//          directory before destroying the process's page
+//          directory, or our active page directory will be one
+//          that's been freed (and cleared). */
+// #ifdef VM
+//     // unmap all memory mapped pages
+//     while (!list_empty(&pcb->mmap_list_)) {
+//       struct list_elem* e = list_pop_front(&pcb->mmap_list_);
+//       struct mmap_entry* ent = list_entry(e, struct mmap_entry, l_elem_);
 
-      while (!list_empty(&ent->m_page_list_)) {
-        struct list_elem* ee = list_pop_front(&ent->m_page_list_);
-        struct mmap_page* m_page = list_entry(ee, struct mmap_page, l_elem_);
-        deallocate_page(pcb, m_page->upage_);
-        file_close(m_page->file_);
-        free(m_page);
-      }
-      free(ent);
-    }
+//       while (!list_empty(&ent->m_page_list_)) {
+//         struct list_elem* ee = list_pop_front(&ent->m_page_list_);
+//         struct mmap_page* m_page = list_entry(ee, struct mmap_page, l_elem_);
+//         deallocate_page(pcb, m_page->upage_);
+//         file_close(m_page->file_);
+//         free(m_page);
+//       }
+//       free(ent);
+//     }
 
-    deallocate_all_pages(pcb);
-#endif
-    cur->pcb->pagedir = NULL;
-    pagedir_activate(NULL);
-    pagedir_destroy(pd);
-  }
+//     deallocate_all_pages(pcb);
+// #endif
+//     cur->pcb->pagedir = NULL;
+//     pagedir_activate(NULL);
+//     pagedir_destroy(pd);
+//   }
 
   /* Free the PCB of this process and kill this thread
      Avoid race where PCB is freed before t->pcb is set to NULL
      If this happens, then an unfortuantely timed timer interrupt
      can try to activate the pagedir, but it is now freed memory */
   struct process* pcb_to_free = cur->pcb;
-  cur->pcb = NULL;
+  // cur->pcb = NULL;
 
   if (pcb_to_free->executable_) {
     file_close(pcb_to_free->executable_);
@@ -432,8 +432,42 @@ void process_exit(void) {
   dir_close(pcb_to_free->pwd_);
   pcb_to_free->pwd_ = NULL;
 
-  free(pcb_to_free);
+  /* Destroy the current process's page directory and switch back
+     to the kernel-only page directory. */
+  pd = cur->pcb->pagedir;
+  if (pd != NULL) {
+    /* Correct ordering here is crucial.  We must set
+         cur->pcb->pagedir to NULL before switching page directories,
+         so that a timer interrupt can't switch back to the
+         process page directory.  We must activate the base page
+         directory before destroying the process's page
+         directory, or our active page directory will be one
+         that's been freed (and cleared). */
+#ifdef VM
+    // unmap all memory mapped pages
+    while (!list_empty(&pcb->mmap_list_)) {
+      struct list_elem* e = list_pop_front(&pcb->mmap_list_);
+      struct mmap_entry* ent = list_entry(e, struct mmap_entry, l_elem_);
 
+      while (!list_empty(&ent->m_page_list_)) {
+        struct list_elem* ee = list_pop_front(&ent->m_page_list_);
+        struct mmap_page* m_page = list_entry(ee, struct mmap_page, l_elem_);
+        deallocate_page(pcb, m_page->upage_);
+        file_close(m_page->file_);
+        free(m_page);
+      }
+      free(ent);
+    }
+
+    deallocate_all_pages(pcb);
+#endif
+    cur->pcb->pagedir = NULL;
+    pagedir_activate(NULL);
+    pagedir_destroy(pd);
+  }
+
+  cur->pcb = NULL;
+  free(pcb_to_free);
 
   // sema_up(&temporary);
   thread_exit();
