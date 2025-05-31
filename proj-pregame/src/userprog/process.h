@@ -55,7 +55,11 @@ struct process_meta {
 /* file opened int the process */
 struct file_info {
   char* file_name_; // file name
-  struct file* file_; // pointer to a file
+
+  /* fields updated in proj4-file system */
+  // struct file* file_; // pointer to a file
+  bool is_file_; /* true if ENTRY_ points to a file */
+  void* entry_; /* poiner to a STRUCT FILE of a STRUCT DIR */
 };
 
 
@@ -97,10 +101,11 @@ struct process {
   
 
   /* fields for file descriptors */
-  // struct rw_lock file_rw_lock_; /* lock for fd hash array */
   struct lock lock_on_file_; /* lock for fd hash array */
-  // struct file** open_files_; /* file hash array with MAX_FILES size */
   struct file_info** open_files_; /* file hash array with MAX_FILES size */
+
+  /* fields updated in proj4-file system */
+  struct dir* pwd_; /* process working directory */
   
   /* user threads fields */
   struct rw_lock lock_on_pthreads_list_; // lock on PTHREADS_LIST_

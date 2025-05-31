@@ -88,12 +88,14 @@ pid_t process_execute(const char* file_name) {
   sema_init(&sema, 0);
 
   // buffer used in the start_process()
-  uint32_t* buffer = (uint32_t*)malloc(sizeof(uint32_t) * 4);
+  uint32_t* buffer = (uint32_t*)malloc(sizeof(uint32_t) * 5);
   buffer[0] = file_name;
   buffer[1] = &sema;
   buffer[2] = current_process->main_thread->tid;
   // 1 for success, 0 for fail
   buffer[3] = 0;
+  /* Proj4- file system: buffer[4] is parent's current working directory */
+  buffer[4] = current_process->pwd_;
 
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create(just_file_name, PRI_DEFAULT, start_process, (void*)buffer);
@@ -120,7 +122,10 @@ static void start_process(void* file_name_) {
   char* cmd_args = (char*)buffer[0];
   struct semaphore* sema = (struct semaphore*)buffer[1];
   pid_t parent_pid = (pid_t)buffer[2];
-  uint32_t* exec_code = (uint32_t*)(buffer + 3);
+  uint32_t* exec_code = (uint32_t*)buffer + 3;
+
+  /* Proj4- file system: buffer[4] is parent's current working directory */
+  struct dir* p_pwd = (struct dir*)buffer[4];
 
   /* Allocate process control block */
   struct process* new_pcb = (struct process*)malloc(sizeof(struct process));
@@ -139,7 +144,6 @@ static void start_process(void* file_name_) {
 
     
     // Initializing the open file hash array in the new pcb
-    // rw_lock_init(&(new_pcb->file_rw_lock_));
     lock_init(&(new_pcb->lock_on_file_));
     new_pcb->open_files_ = (struct file_info*)calloc(sizeof(struct file_info*), MAX_FILES);
 
@@ -164,6 +168,9 @@ static void start_process(void* file_name_) {
     new_pcb->locks_ = (struct lock*)allocated_page;
     new_pcb->semas_ = (struct semaphore*)(allocated_page + USER_LOCK_SIZE);
 
+    /* Proj4 file system */
+    new_pcb->pwd_ = dir_reopen(p_pwd);
+
 #ifdef VM
     /* vitual memory fields */
     lock_init(&new_pcb->lock_on_vm_);
@@ -172,6 +179,7 @@ static void start_process(void* file_name_) {
     new_pcb->next_map_id_ = 0;
     list_init(&new_pcb->mmap_list_);
 #endif
+
   }
 
 
@@ -197,6 +205,7 @@ static void start_process(void* file_name_) {
       file_close(pcb_to_free->executable_);
     }
     free(pcb_to_free->open_files_);
+    dir_close(pcb_to_free->pwd_);
     free(pcb_to_free);
   }
 
@@ -393,8 +402,13 @@ void process_exit(void) {
   for (size_t i = 2; i < MAX_FILES; ++i) {
     if (pcb_to_free->open_files_[i]) {
       struct file_info* info = pcb_to_free->open_files_[i];    
-      file_close(info->file_);
-      info->file_ = NULL;
+      if (info->is_file_) {
+        file_close((struct file*)info->entry_);
+      }
+      else {
+        dir_close((struct dir*)info->entry_);
+      }
+      info->entry_ = NULL;
       free(info->file_name_);
       info->file_name_ = NULL;
       free(info);
@@ -413,6 +427,10 @@ void process_exit(void) {
   }
 
   palloc_free_page((void*)pcb_to_free->locks_);
+
+  /* close current working directory of the process */
+  dir_close(pcb_to_free->pwd_);
+  pcb_to_free->pwd_ = NULL;
 
   free(pcb_to_free);
 
@@ -635,7 +653,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   
   {
     // 2. place the words at the top of the stack and store their address in right-to-left order;
-    command_line = PHYS_BASE -command_length - 1; 
+    command_line = PHYS_BASE - command_length - 1; 
     memcpy(command_line, file_name, command_length + 1);
 
     // 0xc0000000(PHYS_BASE)

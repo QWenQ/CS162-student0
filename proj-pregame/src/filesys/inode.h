@@ -20,4 +20,11 @@ void inode_deny_write(struct inode*);
 void inode_allow_write(struct inode*);
 off_t inode_length(const struct inode*);
 
+/* functions used by directory */
+
+void inode_increase_cnt(struct inode* inode);
+void inode_decrease_cnt(struct inode* inode);
+bool inode_set_as_removed(struct inode* inode);
+
+
 #endif /* filesys/inode.h */

@@ -28,8 +28,12 @@ struct inode_disk {
   block_sector_t indirect_; /* Indirect pointer */
   block_sector_t double_indirect_; /* Double Indirect pointer */
   off_t length_; /* File size in bytes. */
+
+  /* field for directory */
+  size_t entry_cnt_; /* number of files in the directory */
+
   unsigned magic_;       /* Magic number. */
-  uint32_t unused[112]; /* Not used. */
+  uint32_t unused[111]; /* Not used. */
 };
 
 
@@ -49,13 +53,11 @@ struct inode {
   int open_cnt;           /* Number of openers. */
   bool removed;           /* True if deleted, false otherwise. */
   int deny_write_cnt;     /* 0: writes ok, >0: deny writes. */
-  // struct inode_disk data; /* Inode content. */
   struct inode_disk* data_; /* pointer to Inode content. */
 
   /* new fields added in Project 4 File System */
   struct lock inode_lock_; /* lock before accessing inode fields */
   bool is_being_extended_; /* true when the file is being extended */
-  // struct lock disk_lock_; /* lock when check if the file is being extended */
   struct condition disk_cond_; /* broadcast when extending file is done */
 };
 
@@ -250,7 +252,6 @@ struct inode* inode_open(block_sector_t sector) {
     }
     inode = NULL;
   }
-  // lock_release(&lock_on_open_inodes_list);
   if (inode) {
     lock_release(&lock_on_open_inodes_list);
     return inode;
@@ -293,12 +294,18 @@ struct inode* inode_open(block_sector_t sector) {
 
 /* Reopens and returns INODE. */
 struct inode* inode_reopen(struct inode* inode) {
+  struct inode* ret = inode;
   if (inode != NULL) {
     lock_on_inode(inode);
-    inode->open_cnt++;
+    if (inode->removed) {
+      ret = NULL;
+    }
+    else {
+      inode->open_cnt++;
+    }
     unlock_on_inode(inode);
   }
-  return inode;
+  return ret;
 }
 
 /* Returns INODE's inode number. */
@@ -672,4 +679,31 @@ static bool inode_resize(struct inode_disk* id, off_t size) {
 
     id->length_ = size;
     return true;
+}
+
+
+/* add number of files in directory pointed by INODE by 1 */
+void inode_increase_cnt(struct inode* inode) {
+  lock_on_inode(inode);
+  inode->data_->entry_cnt_++;
+  unlock_on_inode(inode);
+}
+
+/* minus number of files in directory pointed by INODE by 1 */
+void inode_decrease_cnt(struct inode* inode) {
+  lock_on_inode(inode);
+  inode->data_->entry_cnt_--;
+  unlock_on_inode(inode);
+}
+
+/* set a directory pointed by INODE as removed only when it's empty */
+bool inode_set_as_removed(struct inode* inode) {
+  bool removed = true;
+  lock_on_inode(inode);
+  if (inode->data_->entry_cnt_ <= 2) {
+    inode->removed = true;
+  }
+  removed = inode->removed;
+  unlock_on_inode(inode);
+  return removed;
 }

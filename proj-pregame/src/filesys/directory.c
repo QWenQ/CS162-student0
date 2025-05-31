@@ -19,12 +19,41 @@ struct dir_entry {
   block_sector_t inode_sector; /* Sector number of header. */
   char name[NAME_MAX + 1];     /* Null terminated file name. */
   bool in_use;                 /* In use or free? */
+  /* new fields added in project 4 - file system */
+  bool is_file_; /* true if the entry points to a file else directory */
+  char* full_path_; /* full path to the current file or directory */
 };
 
 /* Creates a directory with space for ENTRY_CNT entries in the
-   given SECTOR.  Returns true if successful, false on failure. */
-bool dir_create(block_sector_t sector, size_t entry_cnt) {
-  return inode_create(sector, entry_cnt * sizeof(struct dir_entry));
+   given SECTOR.  Returns true if successful, false on failure. 
+   add special directories . and .., the former is the new directory
+   and the latter is its parent directory. Specially, parent directory
+   of new directory is itself.*/
+bool dir_create(block_sector_t sector, size_t entry_cnt, block_sector_t p_sector) {
+  bool success = inode_create(sector, entry_cnt * sizeof(struct dir_entry));
+  if (!success) {
+    return false;
+  }
+  // a directory should contain special directories . and ..
+  struct inode* inode = inode_open(sector); 
+  if (inode == NULL) {
+    return false;
+  }
+  struct dir* dir = dir_open(inode);
+  if (dir == NULL) {
+    inode_close(inode);
+  }
+  // add directory [.] point to itself
+  dir_add(dir, ".", sector, false);
+  // add parent directory, specially, parent directory of root is itself
+  if (sector == ROOT_DIR_SECTOR) {
+    dir_add(dir, "..", sector, false);
+  }
+  else {
+    dir_add(dir, "..", p_sector, false); 
+  }
+  dir_close(dir);
+  return success;
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -113,12 +142,11 @@ bool dir_lookup(const struct dir* dir, const char* name, struct inode** inode) {
 }
 
 /* Adds a file named NAME to DIR, which must not already contain a
-   file by that name.  The file's inode is in sector
-   INODE_SECTOR.
+   file by that name.  The file's inode is in sector INODE_SECTOR.
    Returns true if successful, false on failure.
-   Fails if NAME is invalid (i.e. too long) or a disk or memory
-   error occurs. */
-bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
+   Fails if NAME is invalid (i.e. too long) or a disk or memory error occurs. 
+   IS_FILE is true when an ordinary file is added to the DIR, a directory is added otherwise. */
+bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector, bool is_file) {
   struct dir_entry e;
   off_t ofs;
   bool success = false;
@@ -149,7 +177,11 @@ bool dir_add(struct dir* dir, const char* name, block_sector_t inode_sector) {
   e.in_use = true;
   strlcpy(e.name, name, sizeof e.name);
   e.inode_sector = inode_sector;
+  e.is_file_ = is_file;
   success = inode_write_at(dir->inode, &e, sizeof e, ofs) == sizeof e;
+  if (success) {
+    inode_increase_cnt(dir->inode);
+  }
 
 done:
   return success;
@@ -159,6 +191,10 @@ done:
    Returns true if successful, false on failure,
    which occurs only if there is no file with the given NAME. */
 bool dir_remove(struct dir* dir, const char* name) {
+  // special files [.] and [..] are not allowed to be deleted
+  if (!strcmp(".", name) || !strcmp("..", name)) {
+    return false;
+  }
   struct dir_entry e;
   struct inode* inode = NULL;
   bool success = false;
@@ -177,6 +213,13 @@ bool dir_remove(struct dir* dir, const char* name) {
     goto done;
 
   /* Erase directory entry. */
+  // remove a directory only when it is empty
+  if (!e.is_file_) {
+    success = inode_set_as_removed(inode);
+    if (!success)
+      goto done;
+  }
+
   e.in_use = false;
   if (inode_write_at(dir->inode, &e, sizeof e, ofs) != sizeof e)
     goto done;
@@ -184,6 +227,7 @@ bool dir_remove(struct dir* dir, const char* name) {
   /* Remove inode. */
   inode_remove(inode);
   success = true;
+  inode_decrease_cnt(dir->inode);
 
 done:
   inode_close(inode);
@@ -205,3 +249,57 @@ bool dir_readdir(struct dir* dir, char name[NAME_MAX + 1]) {
   }
   return false;
 }
+
+/* Read a subdirectory with given NAME from directory DIR
+   and returns true if one exists, false otherwise.
+   On success, sets *INODE to an inode for the directory, otherwise to
+   a null pointer.  The caller must close *INODE. */
+bool dir_get_subdir(struct dir* dir, const char* name, struct inode** inode) {
+  if ((dir == NULL) || (name == NULL)) {
+    return false;
+  }
+
+  struct dir_entry e;
+  *inode = NULL;
+  size_t ofs;
+
+  ASSERT(dir != NULL);
+  ASSERT(name != NULL);
+
+  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e) {
+    if (e.in_use && !e.is_file_ && !strcmp(name, e.name)) {
+      *inode = inode_open(e.inode_sector);
+      break;
+    }
+  }
+
+  return *inode != NULL;
+}
+
+/* Read an ordinary file with given NAME from directory DIR
+   and returns true if one exists, false otherwise.
+   On success, sets *INODE to an inode for the ordinary file, otherwise to
+   a null pointer.  The caller must close *INODE. */
+bool dir_get_file(struct dir* dir, const char* name, struct inode** inode) {
+  if ((dir == NULL) || (name == NULL)) {
+    return false;
+  }
+
+  struct dir_entry e;
+  *inode = NULL;
+  size_t ofs;
+
+
+  ASSERT(dir != NULL);
+  ASSERT(name != NULL);
+
+  for (ofs = 0; inode_read_at(dir->inode, &e, sizeof e, ofs) == sizeof e; ofs += sizeof e) {
+    if (e.in_use && e.is_file_ && !strcmp(name, e.name)) {
+      *inode = inode_open(e.inode_sector);
+      break;
+    }
+  }
+
+  return *inode != NULL;
+}
+

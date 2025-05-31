@@ -5,8 +5,12 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "userprog/process.h"
-
-// #define PHYS_BASE 0xc0000000 /* 3 GB. */
+#include "lib/string.h"
+#include "filesys/filesys.h"
+#include "filesys/directory.h"
+#include "filesys/file.h"
+#include "filesys/inode.h"
+#include "filesys/free-map.h"
 
 #ifdef VM
 #define PF_U 0x4 /* 0: kernel, 1: user process. */
@@ -95,7 +99,6 @@ static void exit_if_error(struct intr_frame* f, uint8_t* uaddr, bool read) {
   }
 }
 
-
 /**
  * check if the specified fd is valid
  * @param FD file descriptor.
@@ -110,7 +113,6 @@ static int is_legal_fd(int fd) {
   }
   return 0;
 }
-
 
 // check if there is any argument be above the top of user address space
 static void exit_if_user_address_space_overflow(uint32_t* sp, int args_num) {
@@ -151,9 +153,12 @@ static void string_check(const char* str) {
   } 
 }
 
+
+
+
 /* syscall behaviours */
 /********************************************************************************/
-void sys_exit(struct intr_frame* f UNUSED) {
+static void sys_exit(struct intr_frame* f UNUSED) {
   // signature: void exit(int status)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -165,19 +170,19 @@ void sys_exit(struct intr_frame* f UNUSED) {
   NOT_REACHED();
 }
 
-void sys_practice(struct intr_frame* f UNUSED) {
+static void sys_practice(struct intr_frame* f UNUSED) {
   // signature: int practice (int i)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
   f->eax = args[1] + 1;
 }
 
-void sys_halt(struct intr_frame* f UNUSED) {
+static void sys_halt(struct intr_frame* f UNUSED) {
   // signature: void halt (void)
   shutdown_power_off();
 }
 
-void sys_exec(struct intr_frame* f UNUSED) {
+static void sys_exec(struct intr_frame* f UNUSED) {
   // signature: pid_t exec (const char *cmd_line)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -190,7 +195,7 @@ void sys_exec(struct intr_frame* f UNUSED) {
   free(buffer);
 }
 
-void sys_wait(struct intr_frame* f UNUSED) {
+static void sys_wait(struct intr_frame* f UNUSED) {
   // signature: int wait (pid_t pid)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -198,7 +203,7 @@ void sys_wait(struct intr_frame* f UNUSED) {
   f->eax = process_wait(child_pid);
 }
 
-void sys_create(struct intr_frame* f UNUSED) {
+static void sys_create(struct intr_frame* f UNUSED) {
   // signature: bool create (const char *file, unsigned initial_size)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 3);
@@ -206,11 +211,11 @@ void sys_create(struct intr_frame* f UNUSED) {
   string_check(file);
   unsigned initial_size = (unsigned)args[2];
 
-  bool success = filesys_create(file, initial_size);
+  bool success = filesys_create(file, initial_size, true);
   f->eax = success ? 1 : 0;
 }
 
-void sys_remove(struct intr_frame* f UNUSED) {
+static void sys_remove(struct intr_frame* f UNUSED) {
   // signature: bool remove (const char *file)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -222,7 +227,7 @@ void sys_remove(struct intr_frame* f UNUSED) {
   f->eax = success ? 1 : 0;
 }
 
-void sys_open(struct intr_frame* f UNUSED) {
+static void sys_open(struct intr_frame* f UNUSED) {
   // signature: int open(const char* file)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -234,17 +239,33 @@ void sys_open(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
 
-  struct file* open_file = filesys_open(file_name);
-  if (open_file == NULL) {
+  void* entry_opened = NULL;
+  bool is_file = true;
+  entry_opened = filesys_open_file(file_name);
+  if (entry_opened == NULL) {
+    entry_opened = filesys_open_dir(file_name);
+    if (entry_opened != NULL) {
+      is_file = false;
+    }
+  }
+
+  if (entry_opened == NULL) {
     lock_release(&(pcb->lock_on_file_));
     f->eax = -1;
     return;
   }
 
+
   // create and initilaize a new file_info node
   struct file_info* new_info = (struct file_info*)calloc(sizeof(struct file_info), 1);
   if (new_info == NULL) {
     lock_release(&(pcb->lock_on_file_));
+    if (is_file) {
+      file_close((struct file*)entry_opened);
+    }
+    else {
+      dir_close((struct dir*)entry_opened);
+    }
     f->eax = -1;
     return;
   }
@@ -252,13 +273,19 @@ void sys_open(struct intr_frame* f UNUSED) {
   new_info->file_name_ = (char*)malloc(file_name_len + 1);
   if (new_info->file_name_ == NULL) {
     lock_release(&(pcb->lock_on_file_));
+    if (is_file) {
+      file_close((struct file*)entry_opened);
+    }
+    else {
+      dir_close((struct dir*)entry_opened);
+    }
     free(new_info);
     f->eax = -1;
     return;
   }
-
   strlcpy(new_info->file_name_, file_name, file_name_len + 1);
-  new_info->file_ = open_file;
+  new_info->is_file_ = is_file;
+  new_info->entry_ = entry_opened;
 
   f->eax = -1;
   // rw_lock_acquire(&(pcb->file_rw_lock_), false);
@@ -274,12 +301,17 @@ void sys_open(struct intr_frame* f UNUSED) {
 
   if ((int)f->eax == -1) {
     free(new_info->file_name_);
-    file_close(new_info->file_);
     free(new_info);
+    if (is_file) {
+      file_close((struct file*)entry_opened);
+    }
+    else {
+      dir_close((struct dir*)entry_opened);
+    }
   }
 }
 
-void sys_filesize(struct intr_frame* f UNUSED) {
+static void sys_filesize(struct intr_frame* f UNUSED) {
   // signature: int filesize (int fd)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -293,15 +325,17 @@ void sys_filesize(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
+  f->eax = -1;
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  if (info != NULL) {
-    f->eax = file_length(info->file_);
+  if (info->is_file_) {
+    struct file* file = (struct file*)info->entry_;
+    f->eax = file_length(file);
   }
   lock_release(&(pcb->lock_on_file_));
 }
 
-void sys_read(struct intr_frame* f UNUSED) {
+static void sys_read(struct intr_frame* f UNUSED) {
   // signature: int read (int fd, void *buffer, unsigned size)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 4);
@@ -345,9 +379,13 @@ void sys_read(struct intr_frame* f UNUSED) {
   struct process* pcb = running_thread->pcb;
 
   // rw_lock_acquire(&(pcb->file_rw_lock_), true);
+  f->eax = -1;
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  f->eax = file_read(info->file_, buffer, size);
+  if (info->is_file_) {
+    struct file* file = (struct file*)info->entry_;
+    f->eax = file_read(file, buffer, size);
+  }
   // rw_lock_release(&(pcb->file_rw_lock_), true);
   lock_release(&(pcb->lock_on_file_));
   
@@ -357,7 +395,7 @@ void sys_read(struct intr_frame* f UNUSED) {
 
 }
 
-void sys_write(struct intr_frame* f UNUSED) {
+static void sys_write(struct intr_frame* f UNUSED) {
   // signature: int write (int fd, const void *buffer, unsigned size)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 4);
@@ -389,9 +427,14 @@ void sys_write(struct intr_frame* f UNUSED) {
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
 
+  f->eax = -1;
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  f->eax = file_write(info->file_, buffer, size);
+  if (info->is_file_) {
+    struct file* file = (struct file*)info->entry_;
+    f->eax = file_write(file, buffer, size);
+  }
+  // rw_lock_release(&(pcb->file_rw_lock_), true);
   lock_release(&(pcb->lock_on_file_));
 
 #ifdef VM
@@ -400,7 +443,7 @@ void sys_write(struct intr_frame* f UNUSED) {
 
 }
 
-void sys_seek(struct intr_frame* f UNUSED) {
+static void sys_seek(struct intr_frame* f UNUSED) {
   // signature: void seek (int fd, unsigned position)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 3);
@@ -417,11 +460,14 @@ void sys_seek(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  file_seek(info->file_, position);
+  if (info->is_file_) {
+    struct file* file = (struct file*)info->entry_;
+    file_seek(file, position);
+  }
   lock_release(&(pcb->lock_on_file_));
 }
 
-void sys_tell(struct intr_frame* f UNUSED) {
+static void sys_tell(struct intr_frame* f UNUSED) {
   // signature: int tell(int fd)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -437,11 +483,14 @@ void sys_tell(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  f->eax = file_tell(info->file_);
+  if (info->is_file_) {
+    struct file* file = (struct file*)info->entry_;
+    f->eax = file_tell(file);
+  }
   lock_release(&(pcb->lock_on_file_));
 }
 
-void sys_close(struct intr_frame* f UNUSED) {
+static void sys_close(struct intr_frame* f UNUSED) {
   // signature: void close (int fd)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -455,15 +504,21 @@ void sys_close(struct intr_frame* f UNUSED) {
 
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  file_close(info->file_);
-  info->file_ = NULL;
+  if (info->is_file_) {
+    file_close((struct file*)info->entry_);
+  }
+  else {
+    dir_close((struct dir*)info->entry_);
+  }
+  info->entry_ = NULL;
   free(info->file_name_);
   info->file_name_ = NULL;
+  free(info);
   pcb->open_files_[fd] = NULL;
   lock_release(&(pcb->lock_on_file_));
 }
 
-void sys_compute_e(struct intr_frame* f UNUSED) {
+static void sys_compute_e(struct intr_frame* f UNUSED) {
   // signature: double compute_e (int n)
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -489,7 +544,7 @@ void sys_compute_e(struct intr_frame* f UNUSED) {
   );
 }
 
-void sys_pt_create(struct intr_frame* f UNUSED) {
+static void sys_pt_create(struct intr_frame* f UNUSED) {
   // signature: tid_t sys_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 4);
@@ -503,7 +558,7 @@ void sys_pt_create(struct intr_frame* f UNUSED) {
   f->eax = pthread_execute(sfun, tfun, tfun_arg);
 }
 
-void sys_pt_exit(struct intr_frame* f UNUSED) {
+static void sys_pt_exit(struct intr_frame* f UNUSED) {
   // signature: void sys_pthread_exit(void) NO_RETURN;
   uint32_t* args UNUSED= ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 1);
@@ -511,7 +566,7 @@ void sys_pt_exit(struct intr_frame* f UNUSED) {
   NOT_REACHED();
 }
 
-void sys_pt_join(struct intr_frame* f UNUSED) {
+static void sys_pt_join(struct intr_frame* f UNUSED) {
   // signature: tid_t sys_pthread_join(tid_t tid);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -520,7 +575,7 @@ void sys_pt_join(struct intr_frame* f UNUSED) {
   f->eax = ret_tid;
 }
 
-void sys_lock_init(struct intr_frame* f UNUSED) {
+static void sys_lock_init(struct intr_frame* f UNUSED) {
   // signature: bool lock_init(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -553,7 +608,7 @@ void sys_lock_init(struct intr_frame* f UNUSED) {
   f->eax = success;
 }
 
-void sys_lock_acquire(struct intr_frame* f UNUSED) {
+static void sys_lock_acquire(struct intr_frame* f UNUSED) {
   // signature: void lock_acquire(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -580,7 +635,7 @@ void sys_lock_acquire(struct intr_frame* f UNUSED) {
   f->eax = success;
 }
 
-void sys_lock_release(struct intr_frame* f UNUSED) {
+static void sys_lock_release(struct intr_frame* f UNUSED) {
   // signature: void lock_release(char* lock);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -601,7 +656,7 @@ void sys_lock_release(struct intr_frame* f UNUSED) {
   f->eax = success;
 }
 
-void sys_sema_init(struct intr_frame* f UNUSED) {
+static void sys_sema_init(struct intr_frame* f UNUSED) {
   // signature: bool sema_init(char* sema, int val);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 3);
@@ -639,7 +694,7 @@ void sys_sema_init(struct intr_frame* f UNUSED) {
   f->eax = success;
 }
 
-void sys_sema_down(struct intr_frame* f UNUSED) {
+static void sys_sema_down(struct intr_frame* f UNUSED) {
   // signature: void sema_down(char* sema);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -664,7 +719,7 @@ void sys_sema_down(struct intr_frame* f UNUSED) {
   f->eax = success;
 }
 
-void sys_sema_up(struct intr_frame* f UNUSED) {
+static void sys_sema_up(struct intr_frame* f UNUSED) {
   // signature: void sema_up(char* sema);
   uint32_t* args = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -683,18 +738,22 @@ void sys_sema_up(struct intr_frame* f UNUSED) {
   f->eax = success;
 }
 
-void sys_get_tid(struct intr_frame* f UNUSED) {
+static void sys_get_tid(struct intr_frame* f UNUSED) {
   // signature: tid_t get_tid(void);
   uint32_t* args UNUSED = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 1);
   f->eax = thread_tid();
 }
 
-void sys_mmap(struct intr_frame* f UNUSED) {
+static void sys_mmap(struct intr_frame* f UNUSED) {
   // signature: mapid_t mmap(int fd, void* addr);
   uint32_t* args UNUSED = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 3);
   int fd = (int)args[1];
+  if (is_legal_fd(fd)) {
+    f->eax = -1;
+    return;
+  }
   void* addr = (void*)args[2];
   // exit_if_error(f, addr, false);
 
@@ -711,14 +770,16 @@ void sys_mmap(struct intr_frame* f UNUSED) {
   int file_size = 0;
   struct thread* running_thread = thread_current();
   struct process* pcb = running_thread->pcb;
+  bool is_file = false;
   lock_acquire(&(pcb->lock_on_file_));
   struct file_info* info = pcb->open_files_[fd];
-  if (info != NULL) {
-    file_size = file_length(info->file_);
-    file = info->file_;
+  if (info->is_file_) {
+    is_file = true;
+    file = (struct file*)info->entry_;
+    file_size = file_length(file);
   }
   lock_release(&(pcb->lock_on_file_));
-  if (file_size == 0) {
+  if (!is_file || (file_size == 0)) {
     f->eax = -1;
     return;
   }
@@ -773,7 +834,7 @@ void sys_mmap(struct intr_frame* f UNUSED) {
   f->eax = mmap_ent->mapid_;
 }
 
-void sys_munmap(struct intr_frame* f UNUSED) {
+static void sys_munmap(struct intr_frame* f UNUSED) {
   // signature: void munmap(mapid_t);
   uint32_t* args UNUSED = ((uint32_t*)f->esp);
   exit_if_user_address_space_overflow(args, 2);
@@ -811,17 +872,124 @@ void sys_munmap(struct intr_frame* f UNUSED) {
   free(ent);
 }
 
-// template
-// void sys_(struct intr_frame* f UNUSED) {
-//   // signature: 
-//   uint32_t* args = ((uint32_t*)f->esp);
+static void sys_chdir(struct intr_frame* f UNUSED) {
+  // signature: bool chdir(const char* dir);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  const char* dir_name = (const char*)args[1];
+  size_t dir_len = strlen(dir_name);
+  for (size_t i = 0; i <= dir_len; ++i) {
+    exit_if_error(f, dir_name + i, true);
+  }
 
-// }
+  struct dir* dir = filesys_open_dir(dir_name);
+  if (dir == NULL) {
+    f->eax = false;
+    return;
+  }
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  dir_close(pcb->pwd_);
+  pcb->pwd_ = dir;
+  f->eax = true;
+}
+
+static void sys_mkdir(struct intr_frame* f UNUSED) {
+  // signature: bool mkdir(const char* dir);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  const char* dir_name = (const char*)args[1];
+  size_t dir_len = strlen(dir_name);
+  for (size_t i = 0; i <= dir_len; ++i) {
+    exit_if_error(f, dir_name + i, true);
+  }
+
+  f->eax = filesys_create(dir_name, 2, false);
+}
+
+static void sys_readdir(struct intr_frame* f UNUSED) {
+  // signature: bool readdir(int fd, char name[READDIR_MAX_LEN + 1]);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 3);
+  int fd = (int)args[1];
+  f->eax = is_legal_fd(fd);
+  if ((int)f->eax == -1) {
+    f->eax = false;
+    return;
+  }
+  // pointer to a char array with (READDIR_MAX_LEN + 1) size bytes
+  const char* name = (const char*)args[2];
+  size_t len = strlen(name);
+  for (size_t i = 0; i <= len; ++i) {
+    exit_if_error(f, name + i, false);
+  }
+
+  // fd should be directory type
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  if (pcb->open_files_[fd]->is_file_) {
+    f->eax = false;
+    return;
+  }
+
+  // read a directory entry from fd, while [.] and [..] should not be returned by readdir.
+  f->eax = true;
+  struct dir* fd_dir = (struct dir*)(pcb->open_files_[fd]->entry_);
+  memset(name, 0, NAME_MAX + 1);
+  while (true) {
+    bool success = dir_readdir(fd_dir, name);
+    if (!success) {
+      f->eax = false;
+      break;
+    }
+    if (strcmp(".", name) && strcmp("..", name)) {
+      break;
+    }
+    memset(name, 0, NAME_MAX + 1);
+  }
+}
+
+static void sys_isdir(struct intr_frame* f UNUSED) {
+  // signature: bool isdir(int fd);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  int fd = (int)args[1];
+  f->eax = is_legal_fd(fd);
+  if ((int)f->eax == -1) {
+    f->eax = false;
+    return;
+  }
+
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  f->eax = !pcb->open_files_[fd]->is_file_;
+}
+
+static void sys_inumber(struct intr_frame* f UNUSED) {
+  // signature: int inumber(int fd);
+  uint32_t* args UNUSED = ((uint32_t*)f->esp);
+  exit_if_user_address_space_overflow(args, 2);
+  int fd = (int)args[1];
+  f->eax = is_legal_fd(fd);
+  if ((int)f->eax == -1) {
+    return;
+  }
+
+  struct thread* cur_thread = thread_current();
+  struct process* pcb = cur_thread->pcb;
+  struct inode* inode = NULL;
+  if (pcb->open_files_[fd]->is_file_) {
+    struct file* file = (struct file*)(pcb->open_files_[fd]->entry_);
+    inode = file_get_inode(file);
+  }
+  else {
+    struct dir* dir = (struct dir*)(pcb->open_files_[fd]->entry_);
+    inode = dir_get_inode(dir);
+  }
+  f->eax = inode_get_inumber(inode);
+}
 
 /********************************************************************************/
-
-
-
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
 
@@ -929,6 +1097,21 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
   else if (syscall_number == SYS_MUNMAP) {
     sys_munmap(f);
+  }
+  else if (syscall_number == SYS_CHDIR) {
+    sys_chdir(f);
+  }
+  else if (syscall_number == SYS_MKDIR) {
+    sys_mkdir(f);
+  }
+  else if (syscall_number == SYS_READDIR) {
+    sys_readdir(f);
+  }
+  else if (syscall_number == SYS_ISDIR) {
+    sys_isdir(f);
+  }
+  else if (syscall_number == SYS_INUMBER) {
+    sys_inumber(f);
   }
   else {
     // do nothing
