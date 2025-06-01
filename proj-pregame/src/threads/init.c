@@ -39,6 +39,7 @@
 #include "devices/ide.h"
 #include "filesys/filesys.h"
 #include "filesys/fsutil.h"
+#include "filesys/directory.h"
 #endif
 
 
@@ -404,6 +405,7 @@ static void run_actions(char** argv) {
     a->function(argv);
     argv += a->argc;
   }
+
 }
 
 /* Prints a kernel command line help message and powers off the
