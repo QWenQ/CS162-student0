@@ -46,7 +46,7 @@ static void unlock_paging();
 static struct frame* get_from_user_pool();
 static struct frame* evict();
 static bool add_ref_to_sharing_frame(struct page_ref* ref);
-static void initialize_frame(struct frame* frame, struct page_ref* ref);
+static bool initialize_frame(struct frame* frame, struct page_ref* ref);
 static bool create_a_new_frame(struct page_ref* ref);
 static void clean_up_evicted_frame(struct frame* evicted_frame);
 static bool reusing_frame(struct page_ref* ref);
@@ -237,10 +237,23 @@ static bool add_ref_to_sharing_frame(struct page_ref* cur_ref) {
 }
 
 // initialize a frame according to the page reference
-static void initialize_frame(struct frame* frame, struct page_ref* cur_ref) {
+static bool initialize_frame(struct frame* frame, struct page_ref* cur_ref) {
     struct process* pcb = cur_ref->pcb_;
     struct spt_entry* spte = cur_ref->spte_;
     bool is_dirty = false;
+
+    // update page's PTE
+    uint8_t* upage = spte_get_virtual_addr(spte);
+    bool is_writable = spte_is_writable(spte);
+    bool success = pagedir_set_page(pcb->pagedir, upage, frame->kpage_, is_writable);
+    if (!success) {
+        return false;
+        // PANIC("pagedir_set_page() failed!\n");
+    }
+    pagedir_set_dirty(pcb->pagedir, upage, is_dirty);
+    // update frame's reversing mapping
+    list_push_front(&frame->refs_, &cur_ref->l_elem_);
+
     // if the page is swap type, read data from swap slot and update page's SPTE
     block_slot_t swap_slot_idx = spte_get_swap_index(spte);
     if (swap_slot_idx != INVALID_SWAP_SLOT_IDX) {
@@ -260,24 +273,14 @@ static void initialize_frame(struct frame* frame, struct page_ref* cur_ref) {
             if (size > 0) {
                 off_t read_bytes = file_read_at(file, frame->kpage_, size, offset);
                 if (read_bytes != size) {
-                    return;
+                    return false;
                 }
             }
             memset(frame->kpage_ + size, 0, PGSIZE - size);
         }
     }
 
-
-    // update frame's reversing mapping
-    list_push_front(&frame->refs_, &cur_ref->l_elem_);
-    // update page's PTE
-    uint8_t* upage = spte_get_virtual_addr(spte);
-    bool is_writable = spte_is_writable(spte);
-    bool success = pagedir_set_page(pcb->pagedir, upage, frame->kpage_, is_writable);
-    if (!success) {
-        PANIC("pagedir_set_page() failed!\n");
-    }
-    pagedir_set_dirty(pcb->pagedir, upage, is_dirty);
+    return true;
 }
 
 // return true if a free frame is allocated
@@ -288,13 +291,12 @@ static bool create_a_new_frame(struct page_ref* cur_ref) {
     bool is_writable = spte_is_writable(spte);
     struct frame* new_frame = get_frame_from_user_pool(); 
     if (new_frame) {
-        initialize_frame(new_frame, cur_ref);
+        success = initialize_frame(new_frame, cur_ref);
         // if page is read-only file page, add it to sharing structure
-        if (!is_writable && file) {
+        if (success && !is_writable && file) {
             off_t offset = spte_get_offset(spte);
             add_sharing_frame(file, offset, new_frame);
         }
-        success = true;
     }
     return success;
 }
@@ -350,7 +352,10 @@ static bool reusing_frame(struct page_ref* cur_ref) {
     if (evicted_frame) {
         clean_up_evicted_frame(evicted_frame);
         // initialize the frame with new page's SPTE
-        initialize_frame(evicted_frame, cur_ref);
+        success = initialize_frame(evicted_frame, cur_ref);
+        if (!success) {
+            return false;
+        }
         // if page is read-only file page, add it to sharing structure
         if (!is_writable && file) {
             off_t offset = spte_get_offset(spte);

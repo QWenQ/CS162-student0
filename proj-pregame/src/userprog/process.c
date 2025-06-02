@@ -615,7 +615,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   file = filesys_open(file_name);
   // unlock_on_file_system();
   if (file == NULL) {
-    printf("load: %s: open failed\n", file_name);
+    // printf("load: %s: open failed\n", file_name);
     goto done;
   }
 
