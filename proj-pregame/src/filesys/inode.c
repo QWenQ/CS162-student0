@@ -207,7 +207,8 @@ bool inode_create(block_sector_t sector, off_t length) {
   if (disk_inode != NULL) {
     if (sector != 0) {
       // initialize ordinary files disk info
-      inode_resize(disk_inode, length);
+      success = inode_resize(disk_inode, length);
+      ASSERT(success);
       ASSERT(disk_inode->length_ == length);
       inode_sector_init(disk_inode, length);
       disk_inode->magic_ = INODE_MAGIC;
@@ -350,7 +351,8 @@ void inode_close(struct inode* inode) {
   /* Deallocate blocks if removed. */
   if (inode->removed) {
     free_map_release(inode->sector, 1);
-    inode_resize(inode->data_, 0);
+    bool success = inode_resize(inode->data_, 0);
+    ASSERT(success);
   }
   else {
     // write disk inode info back to disk
@@ -439,6 +441,7 @@ off_t inode_write_at(struct inode* inode, const void* buffer_, off_t size, off_t
   if (offset + size > inode->data_->length_) {
     inode->is_being_extended_ = true;
     resize_done = inode_resize(inode->data_, offset + size);
+    ASSERT(resize_done);
   }
   if (!resize_done) {
     inode->is_being_extended_ = false;

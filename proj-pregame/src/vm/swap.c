@@ -34,16 +34,28 @@ void swapsys_destroy() {
 
 // write data in the frame pointed by BUF to the swap, the frame is 8-sector size
 block_slot_t write_data_to_swap(void* buf) {
+
     lock_acquire(&lock_on_swap);
     block_slot_t slot_idx = 0;
     while (slot_idx < swap_slot_size) {
         if (swap_slots[slot_idx] == 0) {
             swap_slots[slot_idx] = 1;
-            for (uint32_t offset = 0; offset < SECTOR_NUMBERS_PER_SLOT; ++offset) {
-                block_sector_t sector_idx = slot_idx * SECTOR_NUMBERS_PER_SLOT + offset;
-                char* start = (char*)buf + offset * BLOCK_SECTOR_SIZE;
-                block_write(swap_block, sector_idx, (void*)start);
+
+            block_sector_t sector_idx = slot_idx * SECTOR_NUMBERS_PER_SLOT;
+            uint32_t offset = 0;
+            char* start = (char*)buf;
+            // // debug
+            // printf("\t\t\twrite_data_to_swap() into swap: %d\n", sector_idx);
+            while (offset < SECTOR_NUMBERS_PER_SLOT) {
+                // // debug
+                // printf("\t\t\t\tfirst byte: %d, last byte: %d\n", *start, *(start + BLOCK_SECTOR_SIZE - 1));
+
+                sector_idx += offset;
+                block_write(swap_block, sector_idx, start);
+                start += BLOCK_SECTOR_SIZE;
+                offset += 1;
             }
+
             break;
         }
         ++slot_idx;
@@ -57,14 +69,26 @@ block_slot_t write_data_to_swap(void* buf) {
 
 // read data into frame pointed by BUF from swap secotrs [SECTOR_IDX, SECTOR_IDX + 8)
 void read_data_from_swap(void* buf, block_slot_t slot_idx) {
+
     lock_acquire(&lock_on_swap);
     ASSERT(slot_idx < swap_slot_size);
     ASSERT(swap_slots[slot_idx] == 1);
 
-    for (uint32_t offset = 0; offset < SECTOR_NUMBERS_PER_SLOT; ++offset) {
-        block_sector_t sector_idx = slot_idx * SECTOR_NUMBERS_PER_SLOT + offset;
-        char* start = (char*)buf + offset * BLOCK_SECTOR_SIZE;
-        block_read(swap_block, sector_idx, (void*)start);
+    block_sector_t sector_idx = slot_idx * SECTOR_NUMBERS_PER_SLOT;
+    uint32_t offset = 0;
+    char* start = (char*)buf;
+    // // debug
+    // printf("\t\t\tread_data_from_swap() from swap: %d\n", sector_idx);
+    while (offset < SECTOR_NUMBERS_PER_SLOT) {
+
+        sector_idx += offset;
+        block_read(swap_block, sector_idx, start);
+
+        // // debug
+        // printf("\t\t\t\tfirst byte: %d, last byte: %d\n", *start, *(start + BLOCK_SECTOR_SIZE - 1));
+
+        start += BLOCK_SECTOR_SIZE;
+        offset += 1;
     }
 
     swap_slots[slot_idx] = 0;

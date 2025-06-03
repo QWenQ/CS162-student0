@@ -73,6 +73,9 @@ pid_t process_execute(const char* file_name) {
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   char* just_file_name = (char*)calloc(16, 1);
+  if (just_file_name == NULL) {
+    return TID_ERROR;
+  }
   int idx = 0;
   while ((idx < 15) && (file_name[idx] != ' ')) {
     just_file_name[idx] = file_name[idx];
@@ -89,6 +92,11 @@ pid_t process_execute(const char* file_name) {
 
   // buffer used in the start_process()
   uint32_t* buffer = (uint32_t*)malloc(sizeof(uint32_t) * 5);
+  if (buffer == NULL) {
+    free(just_file_name);
+    just_file_name = NULL;
+    return TID_ERROR;
+  }
   buffer[0] = file_name;
   buffer[1] = &sema;
   buffer[2] = current_process->main_thread->tid;
@@ -146,40 +154,53 @@ static void start_process(void* file_name_) {
     // Initializing the open file hash array in the new pcb
     lock_init(&(new_pcb->lock_on_file_));
     new_pcb->open_files_ = (struct file_info*)calloc(sizeof(struct file_info*), MAX_FILES);
+    success = new_pcb->open_files_ != NULL;
+    if (success) {
+      // initialize user thread fields
+      rw_lock_init(&(new_pcb->lock_on_pthreads_list_));
+      list_init(&(new_pcb->pthreads_list_));
 
-    // initialize user thread fields
-    rw_lock_init(&(new_pcb->lock_on_pthreads_list_));
-    list_init(&(new_pcb->pthreads_list_));
+      struct pthread_meta* meta = (struct pthread_meta*)malloc(sizeof(struct pthread_meta));
+      success = meta != NULL;
+      if (success) {
+        meta->thread_id_ = t->tid;
+        meta->thread_ = t;
+        lock_init(&(meta->p_lock_));
+        cond_init(&(meta->p_cond_));
+        meta->p_is_died_ = false;
+        meta->p_has_been_joined_ = false;
 
-    struct pthread_meta* meta = (struct pthread_meta*)malloc(sizeof(struct pthread_meta));
-    meta->thread_id_ = t->tid;
-    meta->thread_ = t;
-    lock_init(&(meta->p_lock_));
-    cond_init(&(meta->p_cond_));
-    meta->p_is_died_ = false;
-    meta->p_has_been_joined_ = false;
+        list_push_front(&(new_pcb->pthreads_list_), &(meta->p_elem_));
 
-    list_push_front(&(new_pcb->pthreads_list_), &(meta->p_elem_));
+        rw_lock_init(&(new_pcb->rw_on_locks_));
+        rw_lock_init(&(new_pcb->rw_on_semas_));
+        new_pcb->locks_ = NULL;
+        new_pcb->semas_ = NULL;
+        uint64_t* allocated_page = (uint64_t*)palloc_get_page(PAL_ZERO);
+        success = allocated_page != NULL;
+        if (!success) {
+          list_pop_front(&(new_pcb->pthreads_list_));
+          free(meta);
+        }
 
+        if (success) {
+          new_pcb->locks_ = (struct lock*)allocated_page;
+          new_pcb->semas_ = (struct semaphore*)(allocated_page + USER_LOCK_SIZE);
 
-    rw_lock_init(&(new_pcb->rw_on_locks_));
-    rw_lock_init(&(new_pcb->rw_on_semas_));
-    uint64_t* allocated_page = (uint64_t*)palloc_get_page(PAL_ZERO | PAL_ASSERT);
-    new_pcb->locks_ = (struct lock*)allocated_page;
-    new_pcb->semas_ = (struct semaphore*)(allocated_page + USER_LOCK_SIZE);
-
-    /* Proj4 file system */
-    new_pcb->pwd_ = dir_reopen(p_pwd);
+          /* Proj4 file system */
+          new_pcb->pwd_ = dir_reopen(p_pwd);
 
 #ifdef VM
-    /* vitual memory fields */
-    lock_init(&new_pcb->lock_on_vm_);
-    supplemental_page_table_init(new_pcb, &new_pcb->spt_);
-    /* mmap fields */
-    new_pcb->next_map_id_ = 0;
-    list_init(&new_pcb->mmap_list_);
+          /* vitual memory fields */
+          lock_init(&new_pcb->lock_on_vm_);
+          supplemental_page_table_init(new_pcb, &new_pcb->spt_);
+          /* mmap fields */
+          new_pcb->next_map_id_ = 0;
+          list_init(&new_pcb->mmap_list_);
 #endif
-
+        }
+      }
+    }
   }
 
 
@@ -206,25 +227,42 @@ static void start_process(void* file_name_) {
     }
     free(pcb_to_free->open_files_);
     dir_close(pcb_to_free->pwd_);
+    palloc_free_page(pcb_to_free->locks_);
     free(pcb_to_free);
   }
 
   /* Clean up. Exit on failure or jump to userspace */
   if (!success) {
     // wake up parent
+    *exec_code = 0;
     sema_up(sema);
     thread_exit();
   }
 
 
   // add a new struct execution_info PROCESS_STATE_LIST
-  struct thread* cur_thread = thread_current();
   struct process_meta* new_info = (struct process_meta*)malloc(sizeof(struct process_meta));
+
   if (new_info == NULL) {
+    // Avoid race where PCB is freed before t->pcb is set to NULL
+    // If this happens, then an unfortuantely timed timer interrupt
+    // can try to activate the pagedir, but it is now freed memory
+    struct process* pcb_to_free = t->pcb;
+    t->pcb = NULL;
+    file_close(pcb_to_free->executable_);
+    free(pcb_to_free->open_files_);
+    dir_close(pcb_to_free->pwd_);
+    palloc_free_page(pcb_to_free->locks_);
+    free(pcb_to_free);
+
+    // wake up parent before exit
+    *exec_code = 0;
+    sema_up(sema);
     thread_exit();
     NOT_REACHED();
   }
-  new_info->pid_ = cur_thread->tid;
+
+  new_info->pid_ = t->tid;
   new_info->parent_pid_ = parent_pid;
   lock_init(&(new_info->lock_));
   cond_init(&(new_info->cond_));
@@ -433,42 +471,6 @@ void process_exit(void) {
   /* close current working directory of the process */
   dir_close(pcb_to_free->pwd_);
   pcb_to_free->pwd_ = NULL;
-
-
-
-//   /* Destroy the current process's page directory and switch back
-//      to the kernel-only page directory. */
-//   pd = cur->pcb->pagedir;
-//   if (pd != NULL) {
-//     /* Correct ordering here is crucial.  We must set
-//          cur->pcb->pagedir to NULL before switching page directories,
-//          so that a timer interrupt can't switch back to the
-//          process page directory.  We must activate the base page
-//          directory before destroying the process's page
-//          directory, or our active page directory will be one
-//          that's been freed (and cleared). */
-// #ifdef VM
-//     // unmap all memory mapped pages
-//     while (!list_empty(&pcb->mmap_list_)) {
-//       struct list_elem* e = list_pop_front(&pcb->mmap_list_);
-//       struct mmap_entry* ent = list_entry(e, struct mmap_entry, l_elem_);
-
-//       while (!list_empty(&ent->m_page_list_)) {
-//         struct list_elem* ee = list_pop_front(&ent->m_page_list_);
-//         struct mmap_page* m_page = list_entry(ee, struct mmap_page, l_elem_);
-//         deallocate_page(pcb, m_page->upage_);
-//         file_close(m_page->file_);
-//         free(m_page);
-//       }
-//       free(ent);
-//     }
-
-//     deallocate_all_pages(pcb);
-// #endif
-//     cur->pcb->pagedir = NULL;
-//     pagedir_activate(NULL);
-//     pagedir_destroy(pd);
-//   }
 
   free(pcb_to_free);
 

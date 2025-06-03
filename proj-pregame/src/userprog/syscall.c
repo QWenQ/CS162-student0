@@ -189,10 +189,13 @@ static void sys_exec(struct intr_frame* f UNUSED) {
   const char* cmd_line = (const char*)args[1];
   string_check(cmd_line);
   int cmd_length = strlen(cmd_line) + 1;
+  f->eax = -1;
   char* buffer = (char*)calloc(cmd_length, 1);
-  strlcpy(buffer, cmd_line, cmd_length);
-  f->eax = process_execute(buffer);
-  free(buffer);
+  if (buffer) {
+    strlcpy(buffer, cmd_line, cmd_length);
+    f->eax = process_execute(buffer);
+    free(buffer);
+  }
 }
 
 static void sys_wait(struct intr_frame* f UNUSED) {
