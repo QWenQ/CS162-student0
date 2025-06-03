@@ -46,7 +46,7 @@ static void unlock_paging();
 static struct frame* get_from_user_pool();
 static struct frame* evict();
 static bool add_ref_to_sharing_frame(struct page_ref* ref);
-static void initialize_frame(struct frame* frame, struct page_ref* ref);
+static bool initialize_frame(struct frame* frame, struct page_ref* ref);
 static bool create_a_new_frame(struct page_ref* ref);
 static void clean_up_evicted_frame(struct frame* evicted_frame);
 static bool reusing_frame(struct page_ref* ref);
@@ -237,22 +237,43 @@ static bool add_ref_to_sharing_frame(struct page_ref* cur_ref) {
 }
 
 // initialize a frame according to the page reference
-static void initialize_frame(struct frame* frame, struct page_ref* cur_ref) {
+static bool initialize_frame(struct frame* frame, struct page_ref* cur_ref) {
+
     struct process* pcb = cur_ref->pcb_;
     struct spt_entry* spte = cur_ref->spte_;
-    bool is_dirty = false;
+    // bool is_dirty = false;
+
+    // update page's PTE
+    uint8_t* upage = spte_get_virtual_addr(spte);
+    bool is_writable = spte_is_writable(spte);
+    // bool is_dirty = pagedir_is_dirty(pcb->pagedir, upage);
+    bool success = pagedir_set_page(pcb->pagedir, upage, frame->kpage_, is_writable);
+    if (!success) {
+        return false;
+        // PANIC("pagedir_set_page() failed!\n");
+    }
+    // update frame's reversing mapping
+    list_push_front(&frame->refs_, &cur_ref->l_elem_);
+
     // if the page is swap type, read data from swap slot and update page's SPTE
     block_slot_t swap_slot_idx = spte_get_swap_index(spte);
     if (swap_slot_idx != INVALID_SWAP_SLOT_IDX) {
+        // // debug
+        // printf("\t\t\tinitialize data from swap\n");
+
         void* upage = spte_get_virtual_addr(spte);
         // wait until the data has been in swap slots
         spte_swap_sema_down(spte);
         read_data_from_swap(frame->kpage_, swap_slot_idx);
         spte_set_swap_index(spte, INVALID_SWAP_SLOT_IDX);
-        is_dirty = true;
+        pagedir_set_dirty(pcb->pagedir, upage, true);
+        // is_dirty = true;
     }
     else {
         // if the page is file type, read data from file block
+        // // debug
+        // printf("\t\t\tinitialize data with zero values\n");
+
         struct file* file = spte_get_file(spte);
         if (file) {
             size_t size = spte_get_size(spte);
@@ -260,24 +281,15 @@ static void initialize_frame(struct frame* frame, struct page_ref* cur_ref) {
             if (size > 0) {
                 off_t read_bytes = file_read_at(file, frame->kpage_, size, offset);
                 if (read_bytes != size) {
-                    return;
+                    return false;
                 }
             }
             memset(frame->kpage_ + size, 0, PGSIZE - size);
         }
+        pagedir_set_dirty(pcb->pagedir, upage, false);
     }
 
-
-    // update frame's reversing mapping
-    list_push_front(&frame->refs_, &cur_ref->l_elem_);
-    // update page's PTE
-    uint8_t* upage = spte_get_virtual_addr(spte);
-    bool is_writable = spte_is_writable(spte);
-    bool success = pagedir_set_page(pcb->pagedir, upage, frame->kpage_, is_writable);
-    if (!success) {
-        PANIC("pagedir_set_page() failed!\n");
-    }
-    pagedir_set_dirty(pcb->pagedir, upage, is_dirty);
+    return true;
 }
 
 // return true if a free frame is allocated
@@ -288,13 +300,17 @@ static bool create_a_new_frame(struct page_ref* cur_ref) {
     bool is_writable = spte_is_writable(spte);
     struct frame* new_frame = get_frame_from_user_pool(); 
     if (new_frame) {
-        initialize_frame(new_frame, cur_ref);
+        // // debug
+        // struct thread* cur_thread = thread_current();
+        // uint32_t upage = spte_get_virtual_addr(cur_ref->spte_);
+        // printf("\t\tthread %d: create_a_new_frame(): kernel page %p for user page %p\n", cur_thread->tid, new_frame->kpage_, upage);
+
+        success = initialize_frame(new_frame, cur_ref);
         // if page is read-only file page, add it to sharing structure
-        if (!is_writable && file) {
+        if (success && !is_writable && file) {
             off_t offset = spte_get_offset(spte);
             add_sharing_frame(file, offset, new_frame);
         }
-        success = true;
     }
     return success;
 }
@@ -304,8 +320,13 @@ static void clean_up_evicted_frame(struct frame* frame) {
     struct list_elem* e = list_front(&frame->refs_);
     struct page_ref* ref = list_entry(e, struct page_ref, l_elem_);
     uint8_t* upage = spte_get_virtual_addr(ref->spte_);
+    // // debug
+    // printf("\t\t\taddress evicted: %p\n", upage);
+
     // if the evicted frame is dirty, write it to swap and update swap idx to its original page reference
     if (pagedir_is_dirty(ref->pcb_->pagedir, upage)) {
+        // // debug
+        // printf("\t\t\tfirst byte: %d, last byte: %d\n", *frame->kpage_, *(frame->kpage_ + PGSIZE - 1));
         block_slot_t swap_slot_idx = write_data_to_swap(frame->kpage_);
         spte_set_swap_index(ref->spte_, swap_slot_idx);
         // signal that the dirty page data has been written into swap slot
@@ -340,6 +361,9 @@ static void clean_up_evicted_frame(struct frame* frame) {
 
 // return true if an using frame is available
 static bool reusing_frame(struct page_ref* cur_ref) {
+    // // debug
+    // printf("\treusing_frame() for address: %p\n", spte_get_virtual_addr(cur_ref->spte_));
+
     bool success = false;
     struct process* pcb = cur_ref->pcb_;
     struct spe_entry* spte = cur_ref->spte_;
@@ -348,9 +372,24 @@ static bool reusing_frame(struct page_ref* cur_ref) {
     // evict a using frame
     struct frame* evicted_frame = evict();
     if (evicted_frame) {
+        // // debug
+        // printf("\t\tevcited frame: first byte: %d, last byte: %d\n", *evicted_frame->kpage_, *(evicted_frame->kpage_ + PGSIZE - 1));
+        // printf("\t\tclean_up_evicted()\n");
+
         clean_up_evicted_frame(evicted_frame);
         // initialize the frame with new page's SPTE
-        initialize_frame(evicted_frame, cur_ref);
+
+
+        // // debug
+        // printf("\t\tafter clean: first byte: %d, last byte: %d\n", *evicted_frame->kpage_, *(evicted_frame->kpage_ + PGSIZE - 1));
+        // // debug
+        // printf("\t\tinitialized_frame()\n");
+        success = initialize_frame(evicted_frame, cur_ref);
+        // // debug
+        // printf("\t\tafter initialized: first byte: %d, last byte: %d\n", *evicted_frame->kpage_, *(evicted_frame->kpage_ + PGSIZE - 1));
+        if (!success) {
+            return false;
+        }
         // if page is read-only file page, add it to sharing structure
         if (!is_writable && file) {
             off_t offset = spte_get_offset(spte);
@@ -439,6 +478,10 @@ void deallocate_frame(struct process* pcb, struct spt_entry* spte) {
         }
         // if the frame is not referred, free the frame into user pool
         if (list_empty(&frame->refs_)) {
+            // // debug
+            // struct thread* cur_thread = thread_current();
+            // printf("\t\tthread %d: deallocate_frame(): kernel page %p\n", cur_thread->tid, frame->kpage_);
+
             // if the frame is sharing, remove it from sharing structure
             struct file* file = spte_get_file(spte);
             off_t offset = spte_get_offset(spte);

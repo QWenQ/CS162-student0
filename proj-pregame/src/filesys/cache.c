@@ -4,6 +4,8 @@
 #include "lib/debug.h"
 #include "filesys.h"
 #include "lib/string.h"
+#include "threads/thread.h"
+
 
 #define BUFFER_CACHE_SIZE_LIMIT 64 // maximum capacity of buffer cache
 #define INVALID_SECOTR_INDEX 0xffffffff
@@ -177,7 +179,7 @@ static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec
     key.sector_idx_ = sec_idx;
     lock_buffer_cache();
 
-    flush_if_timeout();
+    // flush_if_timeout();
 
     struct hash_elem* he = hash_find(&lru_hash, &key.h_elem_);
     if (he) {
@@ -325,6 +327,10 @@ void read_within_buffer_cache(block_sector_t sec_idx, void* buffer, int sector_o
 
 /* write data in BUFFER into sector SEC_IDX */
 void write_within_buffer_cache(block_sector_t sec_idx, const void* buffer, int sector_ofs, size_t data_size) {
+    // // debug
+    // struct thread* cur_thread = thread_current();
+    // printf("thread %d: write_within_buffer_cache(sec_idx = %d, buffer = %p, sector_ofs = %d, data_size = %d)\n", cur_thread->tid, sec_idx, buffer, sector_ofs, data_size);
+
     // get the existing cache sector or allocate a new cache sector from buffer cache 
     block_sector_t old_sec_idx = INVALID_SECOTR_INDEX;
     bool free_sec = false;
