@@ -177,7 +177,7 @@ static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec
     key.sector_idx_ = sec_idx;
     lock_buffer_cache();
 
-    // flush_if_timeout();
+    flush_if_timeout();
 
     struct hash_elem* he = hash_find(&lru_hash, &key.h_elem_);
     if (he) {
@@ -213,10 +213,12 @@ static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec
                 list_push_front(&lru_list, &sec->l_elem_);
                 hash_delete(&lru_hash, &sec->h_elem_);
                 *old_sec_idx = get_idx_cached_sector(sec);
+                block_write(fs_device, *old_sec_idx, sec->cache_addr_);
                 set_idx_cached_sector(sec, sec_idx);
                 hash_insert(&lru_hash, &sec->h_elem_);
                 // old data of evicted sector should be evicted
                 sec->is_initialized_ = false;
+                sec->is_dirty_ = false;
             }
         }
     }
@@ -283,11 +285,12 @@ void read_within_buffer_cache(block_sector_t sec_idx, void* buffer, int sector_o
 
     // the thread the first one executes I/O on the current cache sector
     if (free_sec || old_sec_idx != INVALID_SECOTR_INDEX) {
+        lock_acquire(&sec->lock_);
         // write dirty data back to disk and reset dirty flag of cache sector allocated
-        if (sec->is_dirty_) {
-            block_write(fs_device, old_sec_idx, sec->cache_addr_);
-            sec->is_dirty_ = false;
-        }
+        // if (sec->is_dirty_) {
+        //     block_write(fs_device, old_sec_idx, sec->cache_addr_);
+        //     sec->is_dirty_ = false;
+        // }
         memset(sec->cache_addr_, 0, BLOCK_SECTOR_SIZE);
         // read data wanted into cache buffer
         block_read(fs_device, sec->sector_idx_, sec->cache_addr_);
@@ -299,7 +302,7 @@ void read_within_buffer_cache(block_sector_t sec_idx, void* buffer, int sector_o
         }
 
         // wake up threads blocked for the sector initialization
-        lock_acquire(&sec->lock_);
+        // lock_acquire(&sec->lock_);
         sec->is_initialized_ = true;
         cond_broadcast(&sec->cond_, &sec->lock_);
         lock_release(&sec->lock_);
@@ -333,11 +336,12 @@ void write_within_buffer_cache(block_sector_t sec_idx, const void* buffer, int s
 
     // the thread the first one executes I/O on the current cache sector
     if (free_sec || old_sec_idx != INVALID_SECOTR_INDEX) {
+        lock_acquire(&sec->lock_);
         // write dirty data back to disk and reset dirty flag of cache sector allocated
-        if (sec->is_dirty_) {
-            block_write(fs_device, old_sec_idx, sec->cache_addr_);
-            sec->is_dirty_ = false;
-        }
+        // if (sec->is_dirty_) {
+        //     block_write(fs_device, old_sec_idx, sec->cache_addr_);
+        //     sec->is_dirty_ = false;
+        // }
         memset(sec->cache_addr_, 0, BLOCK_SECTOR_SIZE);
         /* If the sector contains data before or after the chunk
                 we're writing, then we need to read in the sector
@@ -350,7 +354,7 @@ void write_within_buffer_cache(block_sector_t sec_idx, const void* buffer, int s
         sec->is_dirty_ = true;
 
         // wake up threads blocked for the sector initialization
-        lock_acquire(&sec->lock_);
+        // lock_acquire(&sec->lock_);
         sec->is_initialized_ = true;
         cond_broadcast(&sec->cond_, &sec->lock_);
         lock_release(&sec->lock_);
