@@ -125,7 +125,7 @@ struct inode* inode_open(block_sector_t sector) {
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
   inode->removed = false;
-  // block_read(fs_device, inode->sector, inode->data_);
+  block_read(fs_device, inode->sector, inode->data_);
   read_within_buffer_cache(inode->sector, inode->data_, 0, BLOCK_SECTOR_SIZE, false);
   return inode;
 }
