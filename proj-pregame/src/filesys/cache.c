@@ -4,6 +4,9 @@
 #include "lib/debug.h"
 #include "filesys.h"
 #include "lib/string.h"
+#include "lib/stdio.h"
+#include "threads/thread.h"
+
 
 #define BUFFER_CACHE_SIZE_LIMIT 64 // maximum capacity of buffer cache
 #define INVALID_SECOTR_INDEX 0xffffffff
@@ -55,7 +58,7 @@ static bool buffer_cache_less(const struct hash_elem *a_, const struct hash_elem
 static void lock_buffer_cache();
 static void unlock_buffer_cache();
 /* return a pointer to a STRUCT CACHED_SECTOR object with LRU algorithm */
-static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec_idx, bool* free_sec);
+static struct cached_sector* get(block_sector_t sec_idx, bool* free_sec);
 
 
 /* fields of write-back feature */
@@ -171,13 +174,14 @@ static void unlock_buffer_cache() {
 /* return a pointer to a STRUCT CACHED_SECTOR object with LRU algorithm;
     if the sector is got by eviction, OLD_SEC_IDX should store the original sector index;
     if the sector is allocated first time, FREE_SEC should be set as true */
-static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec_idx, bool* free_sec) {
+// static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec_idx, bool* free_sec) {
+static struct cached_sector* get(block_sector_t sec_idx, bool* new_sec) {
     struct cached_sector* sec = NULL;
     struct cached_sector key;
     key.sector_idx_ = sec_idx;
     lock_buffer_cache();
 
-    flush_if_timeout();
+    // flush_if_timeout();
 
     struct hash_elem* he = hash_find(&lru_hash, &key.h_elem_);
     if (he) {
@@ -194,7 +198,7 @@ static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec
             set_idx_cached_sector(sec, sec_idx);
             hash_insert(&lru_hash, &sec->h_elem_);
             list_push_front(&lru_list, &sec->l_elem_);
-            *free_sec = true;
+            *new_sec = true;
         }
         else {
             // evict the least-recently-used sector frame from lru list
@@ -212,11 +216,17 @@ static struct cached_sector* get(block_sector_t sec_idx, block_sector_t* old_sec
                 list_remove(&sec->l_elem_);
                 list_push_front(&lru_list, &sec->l_elem_);
                 hash_delete(&lru_hash, &sec->h_elem_);
-                *old_sec_idx = get_idx_cached_sector(sec);
-                set_idx_cached_sector(sec, sec_idx);
-                hash_insert(&lru_hash, &sec->h_elem_);
-                // old data of evicted sector should be evicted
+                lock_acquire(&sec->lock_);
+                // write dirty data of evicted sector back to disk
+                if (sec->is_dirty_) {
+                    block_write(fs_device, sec->sector_idx_, sec->cache_addr_);
+                    sec->is_dirty_ = false;
+                }
+                sec->sector_idx_ = sec_idx;
                 sec->is_initialized_ = false;
+                lock_release(&sec->lock_);
+                hash_insert(&lru_hash, &sec->h_elem_);
+                *new_sec = true;
             }
         }
     }
@@ -275,18 +285,42 @@ void buffer_cache_destroy() {
 /* read data from sector SEC_IDX into BUFFER, 
     if READ_AHEAD is true, execute read-ahead feature if necessary */
 void read_within_buffer_cache(block_sector_t sec_idx, void* buffer, int sector_ofs, size_t data_size, bool read_ahead) {
+    // // debug
+    // struct thread* cur_thread = thread_current();
+    // char function[128];
+    // memset(function, 0, sizeof function);
+    // snprintf(function, sizeof function, 
+    //     "thread %d: read_within_buffer_cache(sec_idx = %d, buffer = %p, sector_ofs = %d, data_size = %d)",
+    //     cur_thread->tid, sec_idx, buffer, sector_ofs, data_size);
+
     // get the existing cache sector or allocate a new cache sector from buffer cache 
-    block_sector_t old_sec_idx = INVALID_SECOTR_INDEX;
-    bool free_sec = false;
-    struct cached_sector* sec = get(sec_idx, &old_sec_idx, &free_sec);
+    bool new_sec = false;
+    struct cached_sector* sec = get(sec_idx, &new_sec);
+
+    if (sec == NULL) {
+        unpin_cached_sector(sec);
+        // // debug
+        // printf("%s: no availiable cache sectors\n", function);
+        return;
+    }
 
     // the thread the first one executes I/O on the current cache sector
-    if (free_sec || old_sec_idx != INVALID_SECOTR_INDEX) {
+    if (new_sec) {
+        lock_acquire(&sec->lock_);
+
+        // // debug
+        // if (free_sec) {
+        //     printf("%s: get sector %p\n", function, sec->cache_addr_);
+        // }
+        // else {
+        //     printf("%s: evict sector %d and get sector %p\n", function, old_sec_idx, sec->cache_addr_);
+        // }
+
         // write dirty data back to disk and reset dirty flag of cache sector allocated
-        if (sec->is_dirty_) {
-            block_write(fs_device, old_sec_idx, sec->cache_addr_);
-            sec->is_dirty_ = false;
-        }
+        // if (sec->is_dirty_) {
+        //     block_write(fs_device, old_sec_idx, sec->cache_addr_);
+        //     sec->is_dirty_ = false;
+        // }
         memset(sec->cache_addr_, 0, BLOCK_SECTOR_SIZE);
         // read data wanted into cache buffer
         block_read(fs_device, sec->sector_idx_, sec->cache_addr_);
@@ -298,12 +332,15 @@ void read_within_buffer_cache(block_sector_t sec_idx, void* buffer, int sector_o
         }
 
         // wake up threads blocked for the sector initialization
-        lock_acquire(&sec->lock_);
+        // lock_acquire(&sec->lock_);
         sec->is_initialized_ = true;
         cond_broadcast(&sec->cond_, &sec->lock_);
         lock_release(&sec->lock_);
     }
     else {
+        // // debug
+        // printf("%s: sector %p exists\n", function, sec->cache_addr_);
+
         if (buffer) {
             // read-ahead: it sector is in the buffer cache, read its adjacent sector into buffer cache if necessary
             if (read_ahead) {
@@ -321,22 +358,52 @@ void read_within_buffer_cache(block_sector_t sec_idx, void* buffer, int sector_o
     }
 
     unpin_cached_sector(sec);
+    // unlock_buffer_cache();
 }
 
 /* write data in BUFFER into sector SEC_IDX */
 void write_within_buffer_cache(block_sector_t sec_idx, const void* buffer, int sector_ofs, size_t data_size) {
+
     // get the existing cache sector or allocate a new cache sector from buffer cache 
-    block_sector_t old_sec_idx = INVALID_SECOTR_INDEX;
-    bool free_sec = false;
-    struct cached_sector* sec = get(sec_idx, &old_sec_idx, &free_sec);
+    bool new_sec = false;
+    // lock_buffer_cache();
+    struct cached_sector* sec = get(sec_idx, &new_sec);
+
+    // // debug
+    // struct thread* cur_thread = thread_current();
+    // char function[128];
+    // memset(function, 0, sizeof function);
+    // snprintf(function, sizeof function, 
+    //     "thread %d: write_within_buffer_cache(sec_idx = %d, buffer = %p, sector_ofs = %d, data_size = %d)",
+    //     cur_thread->tid, sec_idx, buffer, sector_ofs, data_size);
+
+    
+    if (sec == NULL) {
+        unpin_cached_sector(sec);
+        // // debug
+        // printf("%s: no availiable cache sectors\n", function);
+        return;
+    }
 
     // the thread the first one executes I/O on the current cache sector
-    if (free_sec || old_sec_idx != INVALID_SECOTR_INDEX) {
+    if (new_sec) {
+
+        // // debug
+        // if (free_sec) {
+        //     printf("%s: get sector %p\n", function, sec->cache_addr_);
+        // }
+        // else {
+        //     printf("%s: evict sector %d and get sector %p\n", function, old_sec_idx, sec->cache_addr_);
+        // }
+
+        // lock_acquire(&sec->lock_);
+
         // write dirty data back to disk and reset dirty flag of cache sector allocated
-        if (sec->is_dirty_) {
-            block_write(fs_device, old_sec_idx, sec->cache_addr_);
-            sec->is_dirty_ = false;
-        }
+        // if (sec->is_dirty_) {
+        //     block_write(fs_device, old_sec_idx, sec->cache_addr_);
+        //     sec->is_dirty_ = false;
+        // }
+        lock_acquire(&sec->lock_);
         memset(sec->cache_addr_, 0, BLOCK_SECTOR_SIZE);
         /* If the sector contains data before or after the chunk
                 we're writing, then we need to read in the sector
@@ -345,16 +412,18 @@ void write_within_buffer_cache(block_sector_t sec_idx, const void* buffer, int s
             block_read(fs_device, sec->sector_idx_, sec->cache_addr_);
         }
 
-        memcpy(sec->cache_addr_ + sector_ofs, buffer, data_size);
+        memcpy((char*)(sec->cache_addr_) + sector_ofs, buffer, data_size);
         sec->is_dirty_ = true;
 
         // wake up threads blocked for the sector initialization
-        lock_acquire(&sec->lock_);
         sec->is_initialized_ = true;
         cond_broadcast(&sec->cond_, &sec->lock_);
         lock_release(&sec->lock_);
     }
     else {
+        // // debug
+        // printf("%s: sector %p exists\n", function, sec->cache_addr_);
+
         lock_acquire(&sec->lock_);
         while (!sec->is_initialized_) {
             cond_wait(&sec->cond_, &sec->lock_);
@@ -366,10 +435,12 @@ void write_within_buffer_cache(block_sector_t sec_idx, const void* buffer, int s
     }
 
     unpin_cached_sector(sec);
+    // unlock_buffer_cache();
 }
 
 /* flush all dirty caches back to disk when filesys_done() is called */
 void flush_all_caches() {
+    // lock_buffer_cache();
     // there is no concurrency when flush_all_caches() is called
     struct list_elem* e = NULL;
     for (e = list_begin(&lru_list); e != list_end(&lru_list); e = list_next(e)) {
@@ -378,6 +449,7 @@ void flush_all_caches() {
             block_write(fs_device, sec->sector_idx_, sec->cache_addr_);
         }
     }
+    // unlock_buffer_cache();
 }
 
 /* decrease countdown of buffer cache by one */
