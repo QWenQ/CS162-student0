@@ -1,4 +1,5 @@
 #include "frame.h"
+#include "threads/interrupt.h"
 
 #define INVALID_SWAP_SLOT_IDX 0XFFFFFFFF
 
@@ -342,6 +343,11 @@ static void clean_up_evicted_frame(struct frame* frame) {
         }
     }
 
+    // for sharing frame, the eviction will impact on mutiple threads' virtual-to-physical mappings
+    enum intr_level old_level;
+    if (!pagedir_is_writable(ref->pcb_->pagedir, upage))
+        old_level = intr_disable();
+
     e = NULL;
     // release evicted frame's reverse mapping
     for (e = list_begin(&frame->refs_); e != list_end(&frame->refs_); e = list_next(e)) {
@@ -357,6 +363,9 @@ static void clean_up_evicted_frame(struct frame* frame) {
         struct page_ref* cur_ref = list_entry(e, struct page_ref, l_elem_);
         free(cur_ref);
     }
+
+    if (!pagedir_is_writable(ref->pcb_->pagedir, upage))
+        intr_set_level(old_level);
 }
 
 // return true if an using frame is available
