@@ -352,7 +352,7 @@ static void sys_read(struct intr_frame* f UNUSED) {
 #ifdef VM
   struct thread* cur_thread = thread_current();
   struct process* cur_pcb = cur_thread->pcb;
-  pin_page(cur_pcb, buffer);
+  // pin_page(cur_pcb, buffer);
 #endif
 
   // read from keyboard
@@ -412,7 +412,7 @@ static void sys_write(struct intr_frame* f UNUSED) {
 #ifdef VM
   struct thread* cur_thread = thread_current();
   struct process* cur_pcb = cur_thread->pcb;
-  pin_page(cur_pcb, buffer);
+  // pin_page(cur_pcb, buffer);
 #endif
 
 

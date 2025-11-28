@@ -231,6 +231,7 @@ static bool add_ref_to_sharing_frame(struct page_ref* cur_ref) {
         // add a new page reference to the frame's ref list
         pagedir_set_page(pcb->pagedir, upage, info->frame_->kpage_, false);
         list_push_front(&info->frame_->refs_, &cur_ref->l_elem_);
+        ++info->frame_->pin_cnt_;
         success = true;
     }
 
@@ -312,6 +313,7 @@ static bool create_a_new_frame(struct page_ref* cur_ref) {
             off_t offset = spte_get_offset(spte);
             add_sharing_frame(file, offset, new_frame);
         }
+        ++new_frame->pin_cnt_;
     }
     return success;
 }
@@ -404,6 +406,7 @@ static bool reusing_frame(struct page_ref* cur_ref) {
             off_t offset = spte_get_offset(spte);
             add_sharing_frame(file, offset, evicted_frame);
         }
+        ++evicted_frame->pin_cnt_;
         success = true;
     }
     return success;
